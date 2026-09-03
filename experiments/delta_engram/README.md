@@ -78,5 +78,16 @@ weight decay.
 sbatch experiments/delta_engram/nebius_delta_smoke.sbatch 2 false 1000000
 ```
 
+Acceptance run `4575` completed on `b200-[2-5]` from Git commit
+`684bf33daef2d025b08797a1b0f9be29b109f136`. FSDP2 reported two
+model-owned sharded parameters, confirming that both the Base and Delta
+Engram tables retained their owner-sharded layouts instead of being wrapped a
+second time. The model contained `179,537,046,400` parameters, of which only
+`2,593,075,200` (`1.44%`) were trainable. Both optimizer steps and validation
+completed successfully. Step losses were `3.2852` and `3.3289`; the
+steady-state second step reported `141.27 tokens/s` globally and `13.86 GiB`
+peak allocated memory. The run used two optimizer groups: Delta-PLE K/V at the
+base LR and the Delta table at a 10x LR multiplier with zero weight decay.
+
 For fast architecture debugging, the third argument may reduce the nominal
 rows per head. Acceptance and Odoo runs must use `1000000`.
