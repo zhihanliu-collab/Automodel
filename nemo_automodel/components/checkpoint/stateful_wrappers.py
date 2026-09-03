@@ -346,6 +346,7 @@ class ModelState:
         pp_group: "torch.distributed.ProcessGroup | None" = None,
         *,
         has_expert_parallelism: bool = False,
+        trainable_only: bool = False,
     ):
         """
         Initialize a ModelState instance for distributed checkpointing.
@@ -376,6 +377,9 @@ class ModelState:
                 parallelism. This runtime topology signal keeps PEFT loading on
                 the same path across pipeline ranks, including stages without a
                 local expert module.
+            trainable_only: Whether non-initialization state dicts should contain
+                only parameters whose ``requires_grad`` flag is set. This keeps
+                append-only adaptation checkpoints independent of the frozen base.
         """
         self.model = [model] if isinstance(model, torch.nn.Module) else model
         self.uses_tied_lm_head = is_tied_word_embeddings(self.model[0])
@@ -390,6 +394,7 @@ class ModelState:
         self.cpu_offload = cpu_offload
         self.pp_group = pp_group
         self.has_expert_parallelism = has_expert_parallelism
+        self.trainable_only = trainable_only
 
     def _refresh_local_tied_lm_head(self) -> None:
         """Refresh tied-head metadata after DCP has normalized module state."""
@@ -429,7 +434,13 @@ class ModelState:
         if use_local_peft_collection:
             model_state_dict = {k: v for sd in map(_get_peft_state_dict, self.model) for k, v in sd.items()}
         else:
-            options = StateDictOptions(cpu_offload=True) if self.cpu_offload else None
+            options = (
+                StateDictOptions(cpu_offload=self.cpu_offload, ignore_frozen_params=True)
+                if self.trainable_only
+                else StateDictOptions(cpu_offload=True)
+                if self.cpu_offload
+                else None
+            )
             if self.is_peft:
                 options = StateDictOptions(full_state_dict=True, cpu_offload=True, ignore_frozen_params=True)
 

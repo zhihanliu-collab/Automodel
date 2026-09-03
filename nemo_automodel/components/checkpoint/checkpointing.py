@@ -610,6 +610,7 @@ class Checkpointer:
             self.config.is_peft,
             cpu_offload=self.config.cpu_offload,
             pp_group=self.pp_group,
+            trainable_only=self.config.trainable_only,
         )
         state_dict = model_state.state_dict()
 
@@ -799,6 +800,7 @@ class Checkpointer:
             skip_task_head_prefixes=getattr(self.config, "skip_task_head_prefixes_for_base_model", None),
             cpu_offload=self.config.cpu_offload,
             has_expert_parallelism=self.moe_mesh is not None,
+            trainable_only=self.config.trainable_only,
         )
 
         # Check if this model requires tensor merging (e.g., Mixtral with grouped experts)

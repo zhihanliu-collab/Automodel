@@ -58,4 +58,5 @@ exec torchrun \
   --dataset.num_samples_limit 256 \
   --checkpoint.enabled "$CHECKPOINT_ENABLED" \
   --checkpoint.checkpoint_dir "$CHECKPOINT_DIR" \
+  --checkpoint.trainable_only true \
   --wandb.enable false

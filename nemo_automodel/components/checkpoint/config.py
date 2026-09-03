@@ -103,6 +103,7 @@ class CheckpointingConfig:
     model_repo_id: str | None = None
     save_consolidated: bool | str | SaveConsolidatedMode = "final"
     is_peft: bool = False
+    trainable_only: bool = False  # Save/load only requires_grad model parameters in training checkpoints.
     model_state_dict_keys: list[str] | None = (
         None  # copy of the model state dict keys before any parallelization. Kept for BW compatibility.
     )
@@ -136,6 +137,8 @@ class CheckpointingConfig:
             raise ValueError("checkpoint.consolidation_timeout_minutes must be greater than 0")
         if not isinstance(self.allow_legacy_pickle_restore, bool):
             raise ValueError("checkpoint.allow_legacy_pickle_restore must be a boolean")
+        if not isinstance(self.trainable_only, bool):
+            raise ValueError("checkpoint.trainable_only must be a boolean")
 
         if self.model_cache_dir is None:
             self.model_cache_dir = hf_constants.HF_HUB_CACHE
@@ -174,6 +177,13 @@ class CheckpointingConfig:
 
         # Normalize legacy bools and string aliases to a consolidated export mode.
         self.save_consolidated = _normalize_save_consolidated(self.save_consolidated)
+
+        if self.trainable_only and self.save_consolidated != SaveConsolidatedMode.FALSE:
+            logging.warning(
+                "checkpoint.trainable_only=True produces a partial training checkpoint, so consolidated "
+                "Hugging Face export is disabled."
+            )
+            self.save_consolidated = SaveConsolidatedMode.FALSE
 
         # Consolidated HF safetensors export needs local filesystem semantics and is not
         # supported on msc:// cloud storage paths; use DCP (save_consolidated=false) instead.

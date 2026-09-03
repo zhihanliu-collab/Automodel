@@ -99,6 +99,7 @@ class TestCheckpointingConfig:
             is_peft=False,
         )
         assert cfg.is_async is False
+        assert cfg.trainable_only is False
         assert cfg.allow_legacy_pickle_restore is False
         assert cfg.dequantize_base_checkpoint is None
         assert cfg.single_rank_consolidation is False
@@ -113,6 +114,18 @@ class TestCheckpointingConfig:
         cfg = CheckpointingConfig(allow_legacy_pickle_restore=True)
 
         assert cfg.allow_legacy_pickle_restore is True
+
+    def test_trainable_only_disables_consolidated_export(self, caplog):
+        cfg = CheckpointingConfig(trainable_only=True, save_consolidated="final")
+
+        assert cfg.trainable_only is True
+        assert cfg.save_consolidated.value == "false"
+        assert "partial training checkpoint" in caplog.text
+
+    @pytest.mark.parametrize("invalid_value", [None, 0, 1, "false", "true"])
+    def test_trainable_only_must_be_boolean(self, invalid_value):
+        with pytest.raises(ValueError, match="trainable_only must be a boolean"):
+            CheckpointingConfig(trainable_only=invalid_value)
 
     @pytest.mark.parametrize("invalid_value", [None, 0, 1, "false", "true"])
     def test_allow_legacy_pickle_restore_must_be_boolean(self, invalid_value):

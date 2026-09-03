@@ -908,6 +908,24 @@ def test_model_state_keeps_lm_head_when_config_tied_but_storage_untied():
     assert "model.embed_tokens.weight" in saved_state_dict
 
 
+def test_model_state_trainable_only_excludes_frozen_parameters():
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 2))
+    model[0].requires_grad_(False)
+
+    saved_state_dict = ModelState(model, trainable_only=True).state_dict()
+
+    assert set(saved_state_dict) == {"1.weight", "1.bias"}
+
+
+def test_model_state_trainable_only_does_not_filter_base_initialization():
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 2))
+    model[0].requires_grad_(False)
+
+    saved_state_dict = ModelState(model, is_init_step=True, trainable_only=True).state_dict()
+
+    assert set(saved_state_dict) == {"0.weight", "0.bias", "1.weight", "1.bias"}
+
+
 def test_model_state_drops_lm_head_when_storage_is_actually_tied():
     model = _LocalUntiedButConfiguredModel()
     model.lm_head.weight = model.model.embed_tokens.weight
