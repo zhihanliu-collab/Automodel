@@ -35,6 +35,9 @@ srun --nodes=1 --ntasks=1 --cpus-per-task=64 --mem=512G \
       --max-context 131072 \
       --validation-fraction 0.1 \
       --seed 20260903 \
-      --workers $WORKERS"
+      --workers $WORKERS && \
+    python -m experiments.delta_engram.analyze_delta_hash_occupancy \
+      --cache-dir $OUTPUT_DIR \
+      --rows-per-head 1000000"
 
 echo "[$(date -u +%FT%TZ)] preprocessing complete"

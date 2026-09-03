@@ -58,6 +58,7 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         self._diag_activation_counts: dict[str, int] = defaultdict(int)
         self._diag_train_loss_ema: float | None = None
         self._diag_latest_val_losses: dict[str, float] = {}
+        self._diag_latest_val_token_counts: dict[str, int] = {}
         self._diag_latest_val_step = -1
         self._diag_best_val_losses: dict[str, float] = {}
         self._diag_best_val_steps: dict[str, int] = {}
@@ -204,7 +205,9 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         if self._diag_latest_val_step != int(log_data.step):
             self._diag_latest_val_step = int(log_data.step)
             self._diag_latest_val_losses = {}
+            self._diag_latest_val_token_counts = {}
         self._diag_latest_val_losses[val_name] = val_loss
+        self._diag_latest_val_token_counts[val_name] = int(log_data.metrics["num_label_tokens"])
         previous_best = self._diag_best_val_losses.get(val_name, float("inf"))
         best_loss = min(val_loss, previous_best)
         if val_loss < previous_best:
@@ -228,10 +231,18 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         # The upstream call already sends log_data.metrics to W&B. Add a
         # compact per-bucket view when several validation suites are present.
         if self.dist_env.is_main and wandb.run is not None and len(self._diag_latest_val_losses) > 1:
-            wandb.log(
-                {f"retention/val_loss/{name}": loss for name, loss in self._diag_latest_val_losses.items()},
-                step=log_data.step,
-            )
+            retention_metrics = {
+                f"retention/val_loss/{name}": loss for name, loss in self._diag_latest_val_losses.items()
+            }
+            if len(self._diag_latest_val_losses) == len(self.val_dataloaders):
+                total_tokens = sum(self._diag_latest_val_token_counts.values())
+                aggregate = sum(
+                    self._diag_latest_val_losses[name] * self._diag_latest_val_token_counts[name]
+                    for name in self._diag_latest_val_losses
+                ) / max(total_tokens, 1)
+                retention_metrics["retention/val_loss/aggregate"] = aggregate
+                retention_metrics["retention/num_label_tokens/aggregate"] = total_tokens
+            wandb.log(retention_metrics, step=log_data.step)
 
     def run_train_validation_loop(self) -> Any:
         try:

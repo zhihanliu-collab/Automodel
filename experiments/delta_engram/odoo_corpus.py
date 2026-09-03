@@ -15,7 +15,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Any, ClassVar, Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import torch
@@ -378,7 +378,6 @@ def build_cache(args: argparse.Namespace) -> None:
 class OdooCorpusDatasetConfig:
     """Construction-time configuration for a filtered pretokenized cache."""
 
-    accepts_tokenizer: ClassVar[bool] = False
     cache_dir: str
     split: str
     sources: list[str] | None = None
