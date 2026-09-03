@@ -15,7 +15,11 @@ RESTORE_FROM="${9:-}"
 NUM_EPOCHS="${10:-1}"
 DATASET_LIMIT="${11:-256}"
 EP_SIZE="${12:-8}"
-CP_SIZE="${13:-8}"
+CP_SIZE="${13:-1}"
+READER_LR="${14:-0.00001}"
+TABLE_LR_MULT="${15:-10.0}"
+LR_WARMUP_STEPS="${16:-2}"
+MIN_LR="${17:-0.000001}"
 GPUS_PER_NODE=8
 WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 CONFIG=examples/llm_finetune/qwen/qwen3_8_flash_next_180b_hellaswag_ep64.yaml
@@ -45,7 +49,7 @@ if (( WORLD_SIZE % EP_SIZE != 0 || WORLD_SIZE % CP_SIZE != 0 )); then
   exit 2
 fi
 
-echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$NODE_RANK world_size=$WORLD_SIZE ep_size=$EP_SIZE cp_size=$CP_SIZE delta_rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT"
+echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$NODE_RANK world_size=$WORLD_SIZE ep_size=$EP_SIZE cp_size=$CP_SIZE delta_rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT reader_lr=$READER_LR table_lr_mult=$TABLE_LR_MULT lr_warmup_steps=$LR_WARMUP_STEPS min_lr=$MIN_LR"
 
 RESTORE_ARGS=()
 if [[ -n "$RESTORE_FROM" ]]; then
@@ -65,10 +69,11 @@ exec torchrun \
   --distributed.ep_size "$EP_SIZE" \
   --distributed.cp_size "$CP_SIZE" \
   --freeze_config '{"freeze_modules":[{"glob":"*"}],"unfreeze_modules":[{"glob":"*.delta_ple.ple_embedding.ngram_embedding"},{"glob":"*.delta_ple.key_proj"},{"glob":"*.delta_ple.value_proj"}]}' \
-  --optimizer.lr 0.0001 \
+  --optimizer.lr "$READER_LR" \
   --optimizer.weight_decay 0.0 \
-  --optimizer.param_group_overrides '[{"pattern":"\\.delta_ple\\.ple_embedding\\.ngram_embedding\\.weight$","lr_mult":10.0,"wd_mult":0.0}]' \
-  --lr_scheduler.min_lr 0.00001 \
+  --optimizer.param_group_overrides "[{\"pattern\":\"\\\\.delta_ple\\\\.ple_embedding\\\\.ngram_embedding\\\\.weight$\",\"lr_mult\":$TABLE_LR_MULT,\"wd_mult\":0.0}]" \
+  --lr_scheduler.lr_warmup_steps "$LR_WARMUP_STEPS" \
+  --lr_scheduler.min_lr "$MIN_LR" \
   --step_scheduler.global_batch_size "$WORLD_SIZE" \
   --step_scheduler.max_steps "$MAX_STEPS" \
   --step_scheduler.num_epochs "$NUM_EPOCHS" \

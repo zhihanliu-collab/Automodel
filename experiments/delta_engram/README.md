@@ -71,7 +71,7 @@ select the `b200` partition and never use `main`.
 `nebius_delta_smoke.sbatch` enables the append-only branch with the proposal's
 default one-million nominal rows per head. It freezes the complete base model
 and unfreezes only the Delta table plus Delta-PLE `key_proj`/`value_proj`.
-The reader uses `1e-4` peak LR and the table uses a 10x multiplier with no
+The reader uses a configurable peak LR and the table uses a configurable multiplier with no
 weight decay.
 
 ```bash
@@ -118,9 +118,13 @@ actual Delta optimization signal from per-batch loss noise:
 
 ```bash
 sbatch experiments/delta_engram/nebius_delta_smoke.sbatch \
-  80 false 1000000 delta-learnability '' 10 256 8 8
+  40 false 1000000 delta-learnability-low-lr '' 5 256 8 1 0.00001 10 2 0.000001
 ```
 
-The final two arguments select expert and context parallelism. The 32-B200
-Delta experiments use EP8 + CP8 (DP4); pipeline and tensor parallelism remain
-unsupported by the native Qwen3.8-Flash-Next implementation.
+Arguments 8 and 9 select expert and context parallelism; arguments 10--13 select
+the Delta-PLE reader LR, Delta-table LR multiplier, warmup steps, and minimum LR. Job `4583`
+verified that EP8 + CP8 (DP4) can execute complete optimizer steps, but its first
+two eight-step epoch means rose from `4.1616` to `5.2330` at reader/table peak LRs
+of `1e-4`/`1e-3`, so that unstable run was stopped. The lower-LR diagnostic uses
+EP8 + CP1 to avoid short-sequence CP overhead. Pipeline and tensor parallelism
+remain unsupported by the native Qwen3.8-Flash-Next implementation.
