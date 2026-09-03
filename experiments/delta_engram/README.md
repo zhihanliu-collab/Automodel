@@ -13,6 +13,11 @@ Cluster code is updated only through Git. Logs and checkpoints live under
 `/mnt/data/zhihan/delta-engram`; the checkout lives under
 `/home/zhihan/delta-engram-automodel`.
 
+The Slurm jobs reuse the node-local `miles-dev` Pyxis environment and mount this
+checkout over `/workspace`, so all NeMo AutoModel Python code comes from the recorded
+Git commit. This avoids unpacking a second large framework image into the constrained
+node-local `/mnt/image-storage` volume.
+
 1. Run the one-GPU environment and dataset probe:
 
    ```bash

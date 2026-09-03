@@ -12,11 +12,12 @@
 #SBATCH --output=/mnt/data/zhihan/delta-engram/logs/%x-%j.log
 
 set +u
+set -eo pipefail
 
 CODE_ROOT=/home/zhihan/delta-engram-automodel
 DATA_ROOT=/mnt/data/zhihan/delta-engram
 HF_HOME=/mnt/data/zhihan/hf_cache
-CONTAINER_IMAGE=docker://nvcr.io/nvidia/nemo-automodel:26.08.00
+CONTAINER_NAME=miles-dev
 
 mkdir -p "$DATA_ROOT/logs" "$DATA_ROOT/checkpoints" "$DATA_ROOT/hf-datasets"
 
@@ -25,7 +26,7 @@ git -C "$CODE_ROOT" status --short --branch
 git -C "$CODE_ROOT" rev-parse HEAD
 
 srun --nodes=1 --ntasks=1 --gpus-per-node=1 --cpus-per-task=16 --mem=64G \
-  --container-image="$CONTAINER_IMAGE" \
+  --container-name="$CONTAINER_NAME" \
   --container-mounts="$CODE_ROOT:/workspace,/mnt/data:/mnt/data" \
   --container-workdir=/workspace \
   bash -lc '

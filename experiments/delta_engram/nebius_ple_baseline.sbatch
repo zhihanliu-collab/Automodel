@@ -12,12 +12,13 @@
 #SBATCH --output=/mnt/data/zhihan/delta-engram/logs/%x-%j.log
 
 set +u
+set -eo pipefail
 
 MAX_STEPS="${1:-2}"
 CHECKPOINT_ENABLED="${2:-false}"
 CODE_ROOT=/home/zhihan/delta-engram-automodel
 DATA_ROOT=/mnt/data/zhihan/delta-engram
-CONTAINER_IMAGE=docker://nvcr.io/nvidia/nemo-automodel:26.08.00
+CONTAINER_NAME=miles-dev
 
 mkdir -p "$DATA_ROOT/logs" "$DATA_ROOT/checkpoints"
 
@@ -27,7 +28,7 @@ git -C "$CODE_ROOT" rev-parse HEAD
 
 srun --nodes="$SLURM_NNODES" --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
   --gpus-per-node=8 --cpus-per-task=64 --mem=1000G \
-  --container-image="$CONTAINER_IMAGE" \
+  --container-name="$CONTAINER_NAME" \
   --container-mounts="$CODE_ROOT:/workspace,/mnt/data:/mnt/data" \
   --container-workdir=/workspace \
   bash experiments/delta_engram/run_ple_baseline.sh "$MAX_STEPS" "$CHECKPOINT_ENABLED"
