@@ -1,0 +1,150 @@
+# Restore-only generation and parameter/activation-scale probe for Delta-Engram.
+recipe: experiments.delta_engram.generation_probe.DeltaGenerationProbeRecipe
+
+seed: 1234
+
+step_scheduler:
+  global_batch_size: 32
+  local_batch_size: 1
+  ckpt_every_steps: 1
+  val_every_steps: 1
+  gc_every_steps: 10
+  num_epochs: 1
+  max_steps: 1
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 120
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: nemo_automodel.components.models.qwen3_8_flash_next.config.Qwen3_8_FlashNextConfig.from_pretrained
+    pretrained_model_name_or_path: Qwen/Qwen3.8-Flash-Next
+    name_or_path: Qwen/Qwen3.8-Flash-Next
+    language_model_only: true
+  trust_remote_code: false
+  load_base_model: true
+  torch_dtype: bfloat16
+  use_liger_kernel: false
+  use_sdpa_patching: false
+  backend:
+    _target_: nemo_automodel.components.models.common.BackendConfig
+    attn: flex
+    linear: torch
+    rms_norm: torch_fp32
+    experts: torch_mm
+    dispatcher: hybridep
+    rope_fusion: false
+    fake_balanced_gate: false
+    gate_precision: float32
+    enable_hf_state_dict_adapter: true
+    enable_fsdp_optimizations: true
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: /mnt/data/zhihan/delta-engram/checkpoints/generation-probe
+  model_save_format: safetensors
+  save_consolidated: false
+  trainable_only: true
+
+distributed:
+  strategy: fsdp2
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  ep_size: 16
+  sequence_parallel: false
+  activation_checkpointing: false
+  moe:
+    reshard_after_forward: true
+    wrap_outer_model: true
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.chat_dataset.ChatDataset
+  path_or_dataset_id: allenai/tulu-3-sft-mixture
+  split: "train[:32]"
+  shuffle_seed: 42
+  truncation: true
+  seq_length: 512
+  padding: do_not_pad
+  mask_history: true
+  tokenizer:
+    _target_: transformers.AutoTokenizer.from_pretrained
+    pretrained_model_name_or_path: Qwen/Qwen3.8-Flash-Next
+    trust_remote_code: false
+
+packed_sequence:
+  packed_sequence_size: 0
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn:
+    _target_: nemo_automodel.components.datasets.utils.default_collater
+    pad_seq_len_divisible: 64
+  shuffle: false
+  num_workers: 0
+
+validation_dataset:
+  _target_: nemo_automodel.components.datasets.llm.chat_dataset.ChatDataset
+  path_or_dataset_id: allenai/tulu-3-sft-mixture
+  split: "train[256:288]"
+  shuffle_seed: 42
+  truncation: true
+  seq_length: 512
+  padding: do_not_pad
+  mask_history: true
+  tokenizer:
+    _target_: transformers.AutoTokenizer.from_pretrained
+    pretrained_model_name_or_path: Qwen/Qwen3.8-Flash-Next
+    trust_remote_code: false
+
+validation_dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn:
+    _target_: nemo_automodel.components.datasets.utils.default_collater
+    pad_seq_len_divisible: 64
+  shuffle: false
+  drop_last: true
+  num_workers: 0
+
+optimizer:
+  _target_: transformer_engine.pytorch.optimizers.fused_adam.FusedAdam
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  lr: 3.0e-6
+  weight_decay: 0.0
+  adam_w_mode: true
+  bias_correction: true
+  master_weights: true
+  master_weight_dtype: torch.float32
+  store_param_remainders: true
+  exp_avg_dtype: torch.float32
+  exp_avg_sq_dtype: torch.float32
+  param_group_overrides:
+    - pattern: '\.delta_ple\.ple_embedding\.ngram_embedding\.weight$'
+      lr_mult: 10.0
+      wd_mult: 0.0
+
+lr_scheduler:
+  lr_warmup_steps: 0
+  lr_decay_steps: 1
+  lr_decay_style: cosine
+  min_lr: 3.0e-7
+
+freeze_config:
+  freeze_modules:
+    - glob: '*'
+  unfreeze_modules:
+    - glob: '*.delta_ple.ple_embedding.ngram_embedding'
+    - glob: '*.delta_ple.key_proj'
+    - glob: '*.delta_ple.value_proj'
+
+clip_grad_norm:
+  max_norm: 1.0
+
+wandb:
+  enable: false
