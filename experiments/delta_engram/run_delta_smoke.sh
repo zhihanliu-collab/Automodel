@@ -46,9 +46,9 @@ export TORCHINDUCTOR_CACHE_DIR="$LOCAL_CACHE_ROOT/torchinductor"
 export TRITON_CACHE_DIR="$LOCAL_CACHE_ROOT/triton"
 export CUDA_CACHE_PATH="$LOCAL_CACHE_ROOT/cuda"
 # Inductor otherwise defaults to 32 compile workers *per rank*. With eight
-# ranks and 32 allocated CPUs per node that creates 256-way oversubscription
-# and can stall the first eval-only FlexAttention graph for tens of minutes.
-export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-1}"
+# ranks and 32 allocated CPUs per node that creates 256-way oversubscription.
+# Four per rank exactly matches the 32 CPUs reserved by the launcher.
+export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-4}"
 
 mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH"
 
