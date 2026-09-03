@@ -5,13 +5,16 @@ set -eo pipefail
 
 MAX_STEPS="${1:-2}"
 CHECKPOINT_ENABLED="${2:-false}"
+NODE_RANK="${3:?node rank is required}"
+MASTER_ADDR="${4:?master address is required}"
+MASTER_PORT="${5:?master port is required}"
+NNODES="${6:?node count is required}"
 GPUS_PER_NODE=8
-WORLD_SIZE=$((SLURM_NNODES * GPUS_PER_NODE))
-MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-MASTER_PORT=$((23000 + SLURM_JOB_ID % 10000))
+WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 CONFIG=examples/llm_finetune/qwen/qwen3_8_flash_next_180b_hellaswag_ep64.yaml
 RUN_ROOT=/mnt/data/zhihan/delta-engram
 CHECKPOINT_DIR="$RUN_ROOT/checkpoints/ple-baseline-${SLURM_JOB_ID}"
+LOCAL_CACHE_ROOT="/tmp/zhihan/delta-engram-${SLURM_JOB_ID}"
 
 export PYTHONPATH=/workspace
 export PYTHONNOUSERSITE=1
@@ -23,13 +26,18 @@ export NCCL_DEBUG=INFO
 export NCCL_DEBUG_SUBSYS=INIT,NET
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
+export TORCHINDUCTOR_CACHE_DIR="$LOCAL_CACHE_ROOT/torchinductor"
+export TRITON_CACHE_DIR="$LOCAL_CACHE_ROOT/triton"
+export CUDA_CACHE_PATH="$LOCAL_CACHE_ROOT/cuda"
 
-echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$SLURM_NODEID world_size=$WORLD_SIZE"
+mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH"
+
+echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$NODE_RANK world_size=$WORLD_SIZE"
 
 exec torchrun \
-  --nnodes="$SLURM_NNODES" \
+  --nnodes="$NNODES" \
   --nproc-per-node="$GPUS_PER_NODE" \
-  --node-rank="$SLURM_NODEID" \
+  --node-rank="$NODE_RANK" \
   --rdzv-backend=c10d \
   --rdzv-endpoint="$MASTER_ADDR:$MASTER_PORT" \
   -m nemo_automodel.cli.app "$CONFIG" \

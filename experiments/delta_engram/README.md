@@ -13,10 +13,12 @@ Cluster code is updated only through Git. Logs and checkpoints live under
 `/mnt/data/zhihan/delta-engram`; the checkout lives under
 `/home/zhihan/delta-engram-automodel`.
 
-The Slurm jobs reuse the node-local `miles-dev` Pyxis environment and mount this
-checkout over `/workspace`, so all NeMo AutoModel Python code comes from the recorded
-Git commit. This avoids unpacking a second large framework image into the constrained
-node-local `/mnt/image-storage` volume.
+The Slurm jobs reuse compatible node-local Pyxis environments and mount this checkout
+over `/workspace`, so all NeMo AutoModel Python code comes from the recorded Git commit.
+The four baseline nodes use the same Torch 2.10 / Transformer Engine 2.12 stack even
+though one node's existing container has a different name. This avoids unpacking a
+second large framework image into the constrained node-local `/mnt/image-storage`
+volume.
 
 1. Run the one-GPU environment and dataset probe:
 
