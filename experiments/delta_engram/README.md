@@ -103,3 +103,10 @@ sbatch experiments/delta_engram/nebius_delta_smoke.sbatch 3 true 1000000 delta-r
 `checkpoint.trainable_only=true` still loads the complete Hugging Face base
 checkpoint during initialization. Training checkpoints contain only the Delta
 table and Delta-PLE K/V model state, plus their optimizer and scheduler state.
+
+The 32-GPU round-trip acceptance used jobs `4578` and `4579` from commit
+`25998ad8dc5677252837455e97ad416dcef45c72`. Job `4578` wrote a `4.9 GB`
+model directory and a `25 GB` optimizer directory after step 1; the frozen
+`237.20 GB` base checkpoint was not duplicated. Job `4579` loaded `4.83 GB`
+of Delta model state, restored optimizer/scheduler progress, resumed directly
+at step 2, and completed another validation and checkpoint with exit code 0.
