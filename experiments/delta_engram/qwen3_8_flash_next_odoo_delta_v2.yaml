@@ -95,14 +95,15 @@ dataloader:
   persistent_workers: true
   prefetch_factor: 2
 
-# Gate bucket: the two reference documents (one copy each; they are train-only
-# memorization targets). Scored Delta-on and Delta-off at every validation.
+# Gate bucket: the reference documents (train-only memorization targets; all 16
+# copies of each are kept because a 2-sample loader yields no batch under DP4 --
+# the smoke run logged num_label_tokens 0). Scored Delta-on and Delta-off at
+# every validation.
 validation_dataset_offline_docs:
   _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
   cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
   split: train
   sources: [offline_docs]
-  unique_groups: true
 
 validation_dataset_offline_messages:
   _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
