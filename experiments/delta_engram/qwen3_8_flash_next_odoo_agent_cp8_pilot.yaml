@@ -1,0 +1,155 @@
+# Delta-Engram correctness pilot on native Odoo agent trajectories.
+#
+# The first 16 deterministically shuffled records are training data and the
+# next four are validation data.  At GBS=4 this is four steps per epoch.  The
+# launcher overrides topology/LR/cadence, but the checked-in defaults document
+# the intended 32xB200 run: DP4 x CP8, EP16, TP1, PP1.
+
+recipe: experiments.delta_engram.training_diagnostics.DeltaDiagnosticsTrainingRecipe
+
+seed: 1234
+
+step_scheduler:
+  global_batch_size: 4
+  local_batch_size: 1
+  ckpt_every_steps: 4
+  save_checkpoint_every_epoch: false
+  val_every_steps: 2
+  gc_every_steps: 2
+  num_epochs: 4
+  max_steps: 16
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 120
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: nemo_automodel.components.models.qwen3_8_flash_next.config.Qwen3_8_FlashNextConfig.from_pretrained
+    pretrained_model_name_or_path: Qwen/Qwen3.8-Flash-Next
+    name_or_path: Qwen/Qwen3.8-Flash-Next
+    language_model_only: true
+  trust_remote_code: false
+  load_base_model: true
+  torch_dtype: bfloat16
+  use_liger_kernel: false
+  use_sdpa_patching: false
+  backend:
+    _target_: nemo_automodel.components.models.common.BackendConfig
+    attn: flex
+    linear: torch
+    rms_norm: torch_fp32
+    experts: torch_mm
+    dispatcher: hybridep
+    rope_fusion: false
+    fake_balanced_gate: false
+    gate_precision: float32
+    enable_hf_state_dict_adapter: true
+    enable_fsdp_optimizations: true
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: /mnt/data/zhihan/delta-engram/checkpoints/odoo-agent-cp8-pilot
+  model_save_format: safetensors
+  save_consolidated: false
+
+distributed:
+  strategy: fsdp2
+  tp_size: 1
+  cp_size: 8
+  pp_size: 1
+  ep_size: 16
+  sequence_parallel: false
+  activation_checkpointing: true
+  moe:
+    reshard_after_forward: true
+    wrap_outer_model: true
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.chat_dataset.ChatDataset
+  path_or_dataset_id: /mnt/data/jian/datasets/ccsdk_flashnext/ccsdk960_flashnext_131k.jsonl
+  split: "train[:16]"
+  shuffle_seed: 20260903
+  truncation: do_not_truncate
+  seq_length: 131072
+  padding: do_not_pad
+  mask_history: false
+  preserve_tool_argument_mappings: true
+  tokenizer:
+    _target_: transformers.AutoTokenizer.from_pretrained
+    pretrained_model_name_or_path: Qwen/Qwen3.8-Flash-Next
+    trust_remote_code: false
+
+packed_sequence:
+  packed_sequence_size: 0
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn:
+    _target_: nemo_automodel.components.datasets.utils.default_collater
+    pad_seq_len_divisible: 64
+  shuffle: true
+  num_workers: 0
+
+validation_dataset:
+  _target_: nemo_automodel.components.datasets.llm.chat_dataset.ChatDataset
+  path_or_dataset_id: /mnt/data/jian/datasets/ccsdk_flashnext/ccsdk960_flashnext_131k.jsonl
+  split: "train[16:20]"
+  shuffle_seed: 20260903
+  truncation: do_not_truncate
+  seq_length: 131072
+  padding: do_not_pad
+  mask_history: false
+  preserve_tool_argument_mappings: true
+  tokenizer:
+    _target_: transformers.AutoTokenizer.from_pretrained
+    pretrained_model_name_or_path: Qwen/Qwen3.8-Flash-Next
+    trust_remote_code: false
+
+validation_dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn:
+    _target_: nemo_automodel.components.datasets.utils.default_collater
+    pad_seq_len_divisible: 64
+  shuffle: false
+  drop_last: true
+  num_workers: 0
+
+optimizer:
+  _target_: transformer_engine.pytorch.optimizers.fused_adam.FusedAdam
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  lr: 3.0e-6
+  weight_decay: 0.0
+  adam_w_mode: true
+  bias_correction: true
+  master_weights: true
+  master_weight_dtype: torch.float32
+  store_param_remainders: true
+  exp_avg_dtype: torch.float32
+  exp_avg_sq_dtype: torch.float32
+  param_group_overrides:
+    - pattern: '\.delta_ple\.ple_embedding\.ngram_embedding\.weight$'
+      lr_mult: 10.0
+      wd_mult: 0.0
+
+lr_scheduler:
+  lr_warmup_steps: 1
+  lr_decay_steps: 16
+  lr_decay_style: cosine
+  min_lr: 3.0e-7
+
+clip_grad_norm:
+  max_norm: 1.0
+
+wandb:
+  enable: true
+  project: ${oc.env:WANDB_PROJECT,delta-engram}
+  name: ${oc.env:WANDB_NAME,qwen38-odoo-agent-cp8-pilot}
+  group: ${oc.env:WANDB_GROUP,odoo-delta-pilots}
+  tags: [qwen3.8-flash-next, delta-engram, odoo, fsdp2, ep16, cp8, dp4]
+  dir: ${oc.env:WANDB_DIR,/mnt/data/zhihan/delta-engram/wandb}
