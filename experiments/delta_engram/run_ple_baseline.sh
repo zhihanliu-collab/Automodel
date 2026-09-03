@@ -16,10 +16,11 @@ RUN_ROOT=/mnt/data/zhihan/delta-engram
 CHECKPOINT_DIR="$RUN_ROOT/checkpoints/ple-baseline-${SLURM_JOB_ID}"
 LOCAL_CACHE_ROOT="/tmp/zhihan/delta-engram-${SLURM_JOB_ID}"
 
-export PYTHONPATH=/workspace
 export PYTHONNOUSERSITE=1
 export HF_HOME=/mnt/data/zhihan/hf_cache
 export HF_DATASETS_CACHE="$RUN_ROOT/hf-datasets"
+export PYTHONPATH="/workspace:$RUN_ROOT/site-packages"
+export TORCHAO_SKIP_LOADING_SO_FILES=1
 export NCCL_NET_PLUGIN=none
 export NCCL_NET=IB
 export NCCL_DEBUG=INFO

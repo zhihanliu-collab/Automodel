@@ -20,6 +20,11 @@ though one node's existing container has a different name. This avoids unpacking
 second large framework image into the constrained node-local `/mnt/image-storage`
 volume.
 
+The checkout's lock file requires `torchao==0.14.0`, which is absent from those cached
+containers. It is installed without dependencies into
+`/mnt/data/zhihan/delta-engram/site-packages` and added to `PYTHONPATH`; the run disables
+its incompatible optional C++ extension because this baseline does not enable QAT.
+
 1. Run the one-GPU environment and dataset probe:
 
    ```bash
