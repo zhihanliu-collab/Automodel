@@ -306,9 +306,7 @@ def test_delta_engram_zero_starts_with_a_copied_reader() -> None:
     delta_table = layer.delta_ple.ple_embedding.ngram_embedding
     assert torch.count_nonzero(delta_table.weight) == 0
     base_reader = {
-        name: parameter
-        for name, parameter in layer.ple.named_parameters()
-        if not name.startswith("ple_embedding.")
+        name: parameter for name, parameter in layer.ple.named_parameters() if not name.startswith("ple_embedding.")
     }
     delta_reader = {
         name: parameter

@@ -103,10 +103,7 @@ class Qwen3_8_FlashNextTextConfig(PretrainedConfig):
         if not isinstance(delta_engram_enabled, bool):
             raise TypeError(f"delta_engram_enabled must be a bool, got {type(delta_engram_enabled).__name__}")
         if delta_ngram_vocab_size_per_head <= 0:
-            raise ValueError(
-                "delta_ngram_vocab_size_per_head must be positive, got "
-                f"{delta_ngram_vocab_size_per_head}"
-            )
+            raise ValueError(f"delta_ngram_vocab_size_per_head must be positive, got {delta_ngram_vocab_size_per_head}")
 
         if rope_parameters is not None:
             rope_parameters = dict(rope_parameters)
@@ -361,8 +358,7 @@ class Qwen3_8_FlashNextConfig(PretrainedConfig):
         if delta_ngram_vocab_size_per_head is not None:
             if delta_ngram_vocab_size_per_head <= 0:
                 raise ValueError(
-                    "delta_ngram_vocab_size_per_head must be positive, got "
-                    f"{delta_ngram_vocab_size_per_head}"
+                    f"delta_ngram_vocab_size_per_head must be positive, got {delta_ngram_vocab_size_per_head}"
                 )
             text_config.delta_ngram_vocab_size_per_head = delta_ngram_vocab_size_per_head
 

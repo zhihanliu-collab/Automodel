@@ -1234,14 +1234,10 @@ class Qwen3_8_FlashNextPLELayer(nn.Module):
         if not isinstance(source, Qwen3_8_FlashNextPLELayer):
             raise TypeError(f"source must be a Qwen3_8_FlashNextPLELayer, got {type(source).__name__}")
         source_parameters = {
-            name: parameter
-            for name, parameter in source.named_parameters()
-            if not name.startswith("ple_embedding.")
+            name: parameter for name, parameter in source.named_parameters() if not name.startswith("ple_embedding.")
         }
         target_parameters = {
-            name: parameter
-            for name, parameter in self.named_parameters()
-            if not name.startswith("ple_embedding.")
+            name: parameter for name, parameter in self.named_parameters() if not name.startswith("ple_embedding.")
         }
         if source_parameters.keys() != target_parameters.keys():
             raise ValueError(
