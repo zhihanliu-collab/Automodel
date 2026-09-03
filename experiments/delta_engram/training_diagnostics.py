@@ -115,6 +115,11 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             decay = self.train_loss_ema_decay
             self._diag_train_loss_ema = decay * self._diag_train_loss_ema + (1.0 - decay) * loss
         log_data.metrics["overfit/train_loss_ema"] = self._diag_train_loss_ema
+        for optimizer_index, optimizer in enumerate(self.optimizer):
+            for group_index, group in enumerate(optimizer.param_groups):
+                prefix = f"optimizer/opt_{optimizer_index}_group_{group_index}"
+                log_data.metrics[f"{prefix}/lr"] = float(group["lr"])
+                log_data.metrics[f"{prefix}/lr_mult"] = float(group.get("lr_mult", 1.0))
         super().log_train_metrics(log_data)
 
     def _run_validation_epoch(self, val_dataloader: Any) -> MetricsSample:
