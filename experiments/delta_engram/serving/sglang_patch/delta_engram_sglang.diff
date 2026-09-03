@@ -1,5 +1,5 @@
 --- upstream_configs_qwen4_exp.py	2026-09-03 11:54:56.411093695 -0700
-+++ configs_qwen4_exp.py	2026-09-03 12:03:13.579871460 -0700
++++ configs_qwen4_exp.py	2026-09-03 13:34:49.256116742 -0700
 @@ -30,6 +30,8 @@
          make_ngram_vocab_size_divisible_by=128,
          ple_offload_embedding=False,
@@ -63,7 +63,7 @@
      def short_conv_state_shape(self):
          if not self.short_conv_layer_ids:
 --- upstream_models_qwen4_exp.py	2026-09-03 11:54:56.402092794 -0700
-+++ models_qwen4_exp.py	2026-09-03 12:03:13.590872561 -0700
++++ models_qwen4_exp.py	2026-09-03 13:34:49.267117844 -0700
 @@ -432,6 +432,8 @@
          embedding_dim: int,
          ple_layer_index: int = 0,
