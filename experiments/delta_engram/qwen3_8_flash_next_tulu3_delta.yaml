@@ -4,7 +4,7 @@
 # template and assistant-only loss masking.  It is a format proxy for the
 # eventual E + grounded QA corpus, not the final Odoo dataset.
 
-recipe: TrainFinetuneRecipeForNextTokenPrediction
+recipe: experiments.delta_engram.training_diagnostics.DeltaDiagnosticsTrainingRecipe
 
 seed: 1234
 
@@ -144,5 +144,9 @@ clip_grad_norm:
   max_norm: 1.0
 
 wandb:
-  enable: false
-
+  enable: true
+  project: ${oc.env:WANDB_PROJECT,delta-engram}
+  name: ${oc.env:WANDB_NAME,qwen38-flash-next-delta-engram}
+  group: ${oc.env:WANDB_GROUP,delta-learnability}
+  tags: [qwen3.8-flash-next, delta-engram, fsdp2, ep16]
+  dir: ${oc.env:WANDB_DIR,/mnt/data/zhihan/delta-engram/wandb}
