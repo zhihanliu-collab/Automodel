@@ -1,6 +1,8 @@
 #!/bin/bash
 # Checkpoint -> servable dir -> endpoints -> probes, end to end, on the Nebius cluster.
-# Usage: post_train_pipeline.sh <ckpt-model-dir> <tag> <table: exact|hashed> <alpha> <keys.pt|-> <node-a> <node-b> [export-node]
+# Usage: [PARTITION=b200|h200] [EXPORT_NODE=b200-2] post_train_pipeline.sh <ckpt-model-dir> <tag> <table: exact|hashed> <alpha> <keys.pt|-> <node-a> <node-b>
+#   PARTITION: partition of the serving nodes (default b200). The export runs as a CPU step in the
+#   training container (lf-gdn-smoke, repo at /workspace) on EXPORT_NODE (default b200-2).
 #   e.g. post_train_pipeline.sh /mnt/data/zhihan/delta-engram/checkpoints/odoo-delta-v2/epoch_0_step_339/model v2s339 exact 0.25 \
 #          /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2/delta_exact_keys_train.pt b200-2 b200-3
 # Serves 4 endpoints (2 per node, ports 30000/30001) under name Qwen/Qwen3.8-Flash-Next-Delta-<tag>,
@@ -8,7 +10,8 @@
 # The eval arms are launched separately (reduce100 launchers, add_arms_overlap.sh) once PROBE_GATE=pass.
 set -euo pipefail
 CKPT="${1:?ckpt model dir}"; TAG="${2:?tag}"; TABLE="${3:?exact|hashed}"; ALPHA="${4:?alpha}"; KEYS="${5:?keys.pt or -}"
-NODE_A="${6:?node a}"; NODE_B="${7:?node b}"; EXPORT_NODE="${8:-$NODE_A}"
+NODE_A="${6:?node a}"; NODE_B="${7:?node b}"
+PARTITION="${PARTITION:-b200}"; EXPORT_NODE="${EXPORT_NODE:-b200-2}"
 REPO=/home/zhihan/delta-engram-automodel
 SV=/mnt/data/zhihan/delta-engram/serving
 BASE=/mnt/data/zhihan/hf_cache/hub/models--Qwen--Qwen3.8-Flash-Next/snapshots/de4b8e4d43b917e7706784d8bb445c9af86a3540
@@ -18,11 +21,13 @@ mkdir -p "$SV/logs"
 if [[ ! -f "$OUT/SERVING_MANIFEST.json" ]]; then
   echo "[$(date -u +%FT%TZ)] export $CKPT -> $OUT"
   KEY_ARGS=(); [[ "$TABLE" == "exact" ]] && KEY_ARGS=(--keys "$KEYS")
+  # The training container is usually already running on the node (attach ignores new
+  # mounts), and it carries the repo at /workspace, torch and safetensors.
   srun -p b200 -w "$EXPORT_NODE" --ntasks=1 --cpus-per-task=8 --mem=64G --time=01:00:00 --job-name="export-$TAG" \
-    --container-name="sglang-qwen38flashnext-tp4-$EXPORT_NODE" --container-mounts=/mnt/data:/mnt/data,$REPO:$REPO \
-    python "$REPO/experiments/delta_engram/serving/export_delta_serving_dir.py" \
-      --ckpt-model-dir "$CKPT" --base-snapshot "$BASE" --out "$OUT" --table "$TABLE" --alpha "$ALPHA" "${KEY_ARGS[@]}" \
-    2>&1 | grep -v cpu-bind | tee "$SV/logs/export-$TAG.log" | grep -E "layout|stats|done|rel_change|nonzero" | head -20
+    --container-name=lf-gdn-smoke --container-mounts=/mnt/data:/mnt/data,$REPO:/workspace \
+    bash -lc "export PYTHONNOUSERSITE=1; python /workspace/experiments/delta_engram/serving/export_delta_serving_dir.py \
+      --ckpt-model-dir $CKPT --base-snapshot $BASE --out $OUT --table $TABLE --alpha $ALPHA ${KEY_ARGS[*]}" \
+    2>&1 | grep -v -E "cpu-bind|ignoring --container|^\[reassemble\]" | tee "$SV/logs/export-$TAG.log" | grep -E "layout|rms|nonzero|rel_change|done" | head -12
 fi
 
 echo "[$(date -u +%FT%TZ)] serving $TAG on $NODE_A $NODE_B"
@@ -30,7 +35,7 @@ S=$REPO/experiments/delta_engram/serving/serve_delta.sbatch
 JOBS=()
 for spec in "$NODE_A 30000 tp4-$NODE_A" "$NODE_A 30001 tp4b-$NODE_A" "$NODE_B 30000 tp4-$NODE_B" "$NODE_B 30001 tp4b-$NODE_B"; do
   set -- $spec
-  JOBS+=("$(sbatch --parsable -w "$1" "$S" "$TAG" "$2" "$3")")
+  JOBS+=("$(sbatch --parsable -p "$PARTITION" -w "$1" "$S" "$TAG" "$2" "$3")")
 done
 echo "serving jobs: ${JOBS[*]}"
 EP="$NODE_A:30000 $NODE_A:30001 $NODE_B:30000 $NODE_B:30001"
