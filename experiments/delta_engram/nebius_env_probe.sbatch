@@ -31,13 +31,14 @@ srun --nodes=1 --ntasks=1 --gpus-per-node=1 --cpus-per-task=16 --mem=64G \
   --container-workdir=/workspace \
   bash -lc '
     set +u
+    set -eo pipefail
     export PYTHONPATH=/workspace
     export PYTHONNOUSERSITE=1
     export HF_HOME=/mnt/data/zhihan/hf_cache
     export HF_DATASETS_CACHE=/mnt/data/zhihan/delta-engram/hf-datasets
     nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
     python -c "import torch, transformer_engine; import nemo_automodel; print(torch.__version__, getattr(transformer_engine, \"__version__\", \"unknown\"), nemo_automodel.__file__)"
-    python -c "import nemo_automodel; from transformers import AutoConfig; c=AutoConfig.from_pretrained(\"Qwen/Qwen3.8-Flash-Next\", trust_remote_code=False); print(c.architectures, c.model_type)"
+    python -c "from nemo_automodel.components.models.qwen3_8_flash_next.config import Qwen3_8_FlashNextConfig; c=Qwen3_8_FlashNextConfig.from_pretrained(\"Qwen/Qwen3.8-Flash-Next\"); print(c.architectures, c.model_type, c.text_config.ngram_vocab_size_base)"
     python -c "from datasets import load_dataset; d=load_dataset(\"rowan/hellaswag\", split=\"train[:64]\"); print(d.num_rows, d.column_names)"
   '
 
