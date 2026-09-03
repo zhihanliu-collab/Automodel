@@ -91,5 +91,4 @@ exec torchrun \
   --checkpoint.enabled "$CHECKPOINT_ENABLED" \
   --checkpoint.checkpoint_dir "$CHECKPOINT_DIR" \
   --checkpoint.trainable_only true \
-  "${RESTORE_ARGS[@]}" \
-  --wandb.enable false
+  "${RESTORE_ARGS[@]}"
