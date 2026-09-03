@@ -50,6 +50,12 @@ DELTA_LAYER_MULTIPLIERS = (
 )
 READER_COPIED_FROM_BASE = ("norm_key", "norm_query", "norm_conv", "conv1d")
 DELTA_FILE = "delta_ple.safetensors"
+# safetensors header dtype strings -> torch dtypes
+_SAFETENSORS_DTYPES = {
+    "BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32, "F64": torch.float64,
+    "I64": torch.int64, "I32": torch.int32, "I16": torch.int16, "I8": torch.int8, "U8": torch.uint8,
+    "BOOL": torch.bool, "F8_E4M3": torch.float8_e4m3fn,
+}
 
 
 def _is_prime(value: int) -> bool:
@@ -127,7 +133,7 @@ def reassemble_delta(model_dir: str, delta_prefix: str) -> dict[str, torch.Tenso
                 sys.exit(f"{key}: expected row sharding only, got offsets {offsets}")
         rows = max(o[0] + s[0] for _, o, s, _ in parts)
         tail = parts[0][2][1:]
-        dtype = getattr(torch, parts[0][3].lower()) if isinstance(parts[0][3], str) else parts[0][3]
+        dtype = _SAFETENSORS_DTYPES[str(parts[0][3]).upper()]
         out = torch.empty((rows, *tail), dtype=dtype)
         covered = torch.zeros(rows, dtype=torch.bool)
         for path, offsets, shape, _ in parts:
