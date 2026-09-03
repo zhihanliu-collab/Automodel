@@ -128,3 +128,20 @@ two eight-step epoch means rose from `4.1616` to `5.2330` at reader/table peak L
 of `1e-4`/`1e-3`, so that unstable run was stopped. The lower-LR diagnostic uses
 EP8 + CP1 to avoid short-sequence CP overhead. Pipeline and tensor parallelism
 remain unsupported by the native Qwen3.8-Flash-Next implementation.
+
+The lower-LR learnability run `4598` completed all 40 optimizer steps on 32 B200s
+from commit `2ed0aeeda32423555cf467cc1e41692b1e66d88d`. Only the Delta table and
+Delta-PLE K/V were trainable (`2,593,075,200` parameters, or `1.44%` of the
+`179,537,046,400`-parameter model). Its eight-step epoch mean losses were
+`3.5039`, `5.0852`, `3.9320`, `3.2251`, and `2.5751`: after a transient second-epoch
+overshoot, the final epoch was 26.5% below the first. Steps 2--39 averaged
+`412.74` label tokens/s globally (range `183.45`--`513.28`) with EP8 + CP1 and
+gradient accumulation 1. This establishes a finite, decreasing-loss Delta-only
+optimization signal; the HellaSwag repetition is a mechanism diagnostic rather
+than an Odoo knowledge result.
+
+An attempted optional `causal-conv1d==1.6.0` CUDA fast-path install built a valid
+extension but changed import order such that NeMo's custom Qwen3.8 config was not
+registered with `AutoModelForCausalLM`. The extension is quarantined outside the
+active overlay while that independent throughput optimization is investigated;
+the accepted learnability run uses FLA's PyTorch convolution fallback.
