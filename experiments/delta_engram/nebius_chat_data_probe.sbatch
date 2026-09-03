@@ -15,6 +15,8 @@ set -eo pipefail
 
 CODE_ROOT=/home/zhihan/delta-engram-automodel
 RUN_ROOT=/mnt/data/zhihan/delta-engram
+DATASET_PATH="${1:-}"
+LIMIT="${2:-1}"
 
 mkdir -p "$RUN_ROOT/logs" "$RUN_ROOT/hf-datasets"
 
@@ -33,8 +35,14 @@ srun --nodes=1 --ntasks=1 --cpus-per-task=8 --mem=64G \
     export HF_HOME=/mnt/data/zhihan/hf_cache
     export HF_DATASETS_CACHE=/mnt/data/zhihan/delta-engram/hf-datasets
     export PYTHONPATH=/workspace:/mnt/data/zhihan/delta-engram/python-overlay
-    python experiments/delta_engram/probe_chat_dataset.py
+    if [[ -n "'"$DATASET_PATH"'" ]]; then
+      python experiments/delta_engram/analyze_chat_corpus.py \
+        "'"$DATASET_PATH"'" \
+        --preserve-tool-argument-mappings \
+        --limit "'"$LIMIT"'"
+    else
+      python experiments/delta_engram/probe_chat_dataset.py
+    fi
   '
 
 echo "[$(date -u +%FT%TZ)] chat data probe complete"
-
