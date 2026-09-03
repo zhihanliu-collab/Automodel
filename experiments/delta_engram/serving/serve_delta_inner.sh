@@ -12,8 +12,13 @@ md5sum "$SGL/models/qwen4_exp.py" "$SGL/configs/qwen4_exp.py"
 grep -c "delta_ple" "$SGL/models/qwen4_exp.py" | sed 's/^/delta_ple mentions in model file: /'
 [ -f "$MODEL_DIR/SERVING_MANIFEST.json" ] || { echo "FATAL: $MODEL_DIR not exported (no SERVING_MANIFEST.json)"; exit 2; }
 export HF_HUB_OFFLINE=1
-# Same serving recipe as the base Flash-Next B200 replicas (serve_inner_b200.sh);
-# only the model directory and the served name differ.
+# Same serving recipe as the base Flash-Next replicas (serve_inner_b200.sh /
+# serve_inner_tp4_c.sh); only the model directory and the served name differ.
+# The flashinfer linear-attention path on Hopper asserts a float32 SSM state
+# ("initial_state must be float32"), Blackwell serves it in bf16.
+MAMBA_DTYPE=bfloat16
+if nvidia-smi -L | head -1 | grep -q "H200"; then MAMBA_DTYPE=float32; fi
+echo "mamba ssm dtype: $MAMBA_DTYPE"
 exec sglang serve \
   --model-path "$MODEL_DIR" \
   --served-model-name "Qwen/Qwen3.8-Flash-Next-Delta-$TAG" \
@@ -22,7 +27,7 @@ exec sglang serve \
   --chunked-prefill-size 8192 \
   --linear-attn-prefill-backend flashinfer \
   --linear-attn-decode-backend flashinfer \
-  --mamba-ssm-dtype bfloat16 \
+  --mamba-ssm-dtype "$MAMBA_DTYPE" \
   --speculative-algorithm NEXTN \
   --speculative-num-steps 3 \
   --speculative-eagle-topk 1 \
