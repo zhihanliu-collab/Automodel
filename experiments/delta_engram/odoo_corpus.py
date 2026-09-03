@@ -27,6 +27,7 @@ SOURCE_BILLS = "offline_bills_messages"
 SOURCE_MEMORY = "memory_edits"
 SOURCE_AGENTS = "agent_trajectories"
 ALL_SOURCES = (SOURCE_BILLS, SOURCE_MEMORY, SOURCE_AGENTS)
+SOURCE_TO_ID = {source: index for index, source in enumerate(ALL_SOURCES)}
 _BILL_ID_RE = re.compile(r"bill\s*\(id=(\d+)\)", re.IGNORECASE)
 _WORKER_TOKENIZER: Any | None = None
 _WORKER_MAX_CONTEXT = 131072
@@ -424,6 +425,7 @@ class OdooCorpusDataset(Dataset):
             "input_ids": input_ids,
             "labels": labels,
             "attention_mask": torch.ones_like(input_ids),
+            "source_id": torch.tensor(SOURCE_TO_ID[record["source"]], dtype=torch.long),
         }
 
 

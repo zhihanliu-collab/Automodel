@@ -28,6 +28,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from experiments.delta_engram.generation_probe import _difference_stats, _local_tensor, _tensor_stats
+from experiments.delta_engram.odoo_corpus import ALL_SOURCES
 from nemo_automodel.components.loggers.metric_logger import MetricsSample
 from nemo_automodel.recipes.llm.train_ft import TrainFinetuneRecipeForNextTokenPrediction
 from nemo_automodel.shared.import_utils import safe_import
@@ -60,6 +61,10 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         self._diag_activation_maxima: dict[str, torch.Tensor] = {}
         self._diag_activation_counts: dict[str, int] = defaultdict(int)
         self._diag_train_loss_ema: float | None = None
+        self._diag_source_loss_ema: dict[str, float] = {}
+        self._diag_source_loss_numerators: torch.Tensor | None = None
+        self._diag_source_label_tokens: torch.Tensor | None = None
+        self._diag_source_samples: torch.Tensor | None = None
         self._diag_latest_val_losses: dict[str, float] = {}
         self._diag_latest_val_token_counts: dict[str, int] = {}
         self._diag_latest_val_step = -1
@@ -83,6 +88,82 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             self._diag_table_module.register_forward_pre_hook(self._capture_step0_touched_rows),
             self._diag_table_module.weight.register_hook(self._capture_step0_row_grads),
         ]
+
+    def _forward_backward_step(
+        self,
+        idx,
+        batch,
+        *,
+        loss_buffer,
+        num_label_tokens,
+        num_batches,
+        is_train: bool = True,
+    ):
+        """Capture exact token-weighted source losses without changing backward."""
+        source_ids = batch.get("source_id")
+        label_count = None
+        if is_train and source_ids is not None:
+            unique_sources = torch.unique(source_ids)
+            if unique_sources.numel() != 1:
+                raise ValueError("Per-source diagnostics require each local microbatch to contain one source")
+            source_id = int(unique_sources.item())
+            if source_id < 0 or source_id >= len(ALL_SOURCES):
+                raise ValueError(f"Unknown source_id={source_id}")
+            label_count = int(torch.count_nonzero(batch["labels"] != -100).item())
+        before = len(loss_buffer)
+        result = super()._forward_backward_step(
+            idx,
+            batch,
+            loss_buffer=loss_buffer,
+            num_label_tokens=num_label_tokens,
+            num_batches=num_batches,
+            is_train=is_train,
+        )
+        if is_train and source_ids is not None and label_count is not None:
+            device = loss_buffer[-1].device
+            if self._diag_source_loss_numerators is None:
+                self._diag_source_loss_numerators = torch.zeros(len(ALL_SOURCES), dtype=torch.float64, device=device)
+                self._diag_source_label_tokens = torch.zeros(len(ALL_SOURCES), dtype=torch.float64, device=device)
+                self._diag_source_samples = torch.zeros(len(ALL_SOURCES), dtype=torch.float64, device=device)
+            local_normalized_loss = torch.stack(loss_buffer[before:]).sum().detach().double()
+            self._diag_source_loss_numerators[source_id] += local_normalized_loss * float(num_label_tokens)
+            # The unsharded batch is replicated over CP. Count its labels and
+            # sample only once, while loss numerators retain every CP shard.
+            cp_rank = self.device_mesh["cp"].get_local_rank() if self._get_cp_group_size() > 1 else 0
+            if cp_rank == 0:
+                self._diag_source_label_tokens[source_id] += label_count
+                self._diag_source_samples[source_id] += int(source_ids.numel())
+        return result
+
+    def _source_train_metrics(self) -> dict[str, float]:
+        if self._diag_source_loss_numerators is None:
+            return {}
+        numerators = self._diag_source_loss_numerators
+        label_tokens = self._diag_source_label_tokens
+        samples = self._diag_source_samples
+        assert label_tokens is not None and samples is not None
+        group = self._get_dp_group(include_cp=True)
+        dist.all_reduce(numerators, op=dist.ReduceOp.SUM, group=group)
+        dist.all_reduce(label_tokens, op=dist.ReduceOp.SUM, group=group)
+        dist.all_reduce(samples, op=dist.ReduceOp.SUM, group=group)
+        metrics: dict[str, float] = {}
+        for source_id, source in enumerate(ALL_SOURCES):
+            tokens = float(label_tokens[source_id].item())
+            if tokens <= 0:
+                continue
+            loss = float(numerators[source_id].item()) / tokens
+            previous = self._diag_source_loss_ema.get(source)
+            ema = loss if previous is None else self.train_loss_ema_decay * previous + (1 - self.train_loss_ema_decay) * loss
+            self._diag_source_loss_ema[source] = ema
+            prefix = f"train_source/{source}"
+            metrics[f"{prefix}/loss"] = loss
+            metrics[f"{prefix}/loss_ema"] = ema
+            metrics[f"{prefix}/num_label_tokens"] = tokens
+            metrics[f"{prefix}/num_samples"] = float(samples[source_id].item())
+        self._diag_source_loss_numerators = None
+        self._diag_source_label_tokens = None
+        self._diag_source_samples = None
+        return metrics
 
     def _capture_step0_touched_rows(self, _module: nn.Module, inputs: tuple[torch.Tensor, ...]) -> None:
         if int(self.step_scheduler.step) != 0 or not inputs:
@@ -173,6 +254,7 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         return hook
 
     def log_train_metrics(self, log_data: MetricsSample) -> None:
+        log_data.metrics.update(self._source_train_metrics())
         if int(log_data.step) == 0:
             log_data.metrics.update(self._step0_gradient_metrics())
         loss = float(log_data.metrics["loss"])
