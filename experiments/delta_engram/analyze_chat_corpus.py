@@ -65,7 +65,12 @@ def _threshold_stats(lengths: list[int], max_context: int) -> ThresholdStats:
 
 
 def analyze(
-    *, dataset_path: Path, model_id: str, progress_every: int, preserve_tool_argument_mappings: bool
+    *,
+    dataset_path: Path,
+    model_id: str,
+    progress_every: int,
+    preserve_tool_argument_mappings: bool,
+    sequence_lengths_only: bool,
 ) -> dict[str, object]:
     """Render a chat JSONL with the model template and calculate length statistics.
 
@@ -75,6 +80,8 @@ def analyze(
         progress_every: Log progress after this many samples; zero disables it.
         preserve_tool_argument_mappings: Render raw JSONL rows directly so Qwen3.8
             receives tool-call arguments as mappings instead of JSON strings.
+        sequence_lengths_only: Skip assistant-mask construction and only measure
+            context lengths. Useful for templates without generation blocks.
 
     Returns:
         JSON-serializable corpus length and supervision statistics.
@@ -109,11 +116,13 @@ def analyze(
                 tools=row.get("tools"),
                 tokenize=True,
                 return_dict=True,
-                return_assistant_tokens_mask=True,
+                return_assistant_tokens_mask=not sequence_lengths_only,
                 padding=False,
                 truncation=False,
             )
-            supervised = [bool(value) for value in sample["assistant_masks"]]
+            supervised = (
+                [] if sequence_lengths_only else [bool(value) for value in sample["assistant_masks"]]
+            )
         else:
             sample = dataset[index]
             supervised = [label != -100 for label in sample["labels"]]
@@ -122,14 +131,15 @@ def analyze(
             for position, value in enumerate(supervised)
         )
         sequence_lengths.append(len(sample["input_ids"]))
-        supervised_lengths.append(sum(supervised))
-        supervised_runs.append(run_count)
+        if not sequence_lengths_only:
+            supervised_lengths.append(sum(supervised))
+            supervised_runs.append(run_count)
         if progress_every > 0 and (index + 1) % progress_every == 0:
             logger.info("Rendered %d/%d samples", index + 1, dataset_length)
 
     if not sequence_lengths:
         raise RuntimeError(f"Dataset is empty: {dataset_path}")
-    if any(length == 0 for length in supervised_lengths):
+    if not sequence_lengths_only and any(length == 0 for length in supervised_lengths):
         empty_indices = [index for index, length in enumerate(supervised_lengths) if length == 0]
         raise RuntimeError(f"Samples have no supervised assistant tokens: {empty_indices[:20]}")
 
@@ -148,14 +158,18 @@ def analyze(
             "min": min(sequence_lengths),
             "quantiles": {str(q): _nearest_rank(sequence_lengths, q) for q in quantiles},
         },
-        "supervised_tokens": {
+        "supervised_tokens": None
+        if sequence_lengths_only
+        else {
             "total": total_supervised,
             "mean": total_supervised / len(supervised_lengths),
             "fraction_of_sequence": total_supervised / total_tokens,
             "min": min(supervised_lengths),
             "quantiles": {str(q): _nearest_rank(supervised_lengths, q) for q in quantiles},
         },
-        "assistant_supervised_runs": {
+        "assistant_supervised_runs": None
+        if sequence_lengths_only
+        else {
             "total": sum(supervised_runs),
             "mean": sum(supervised_runs) / len(supervised_runs),
             "min": min(supervised_runs),
@@ -175,6 +189,7 @@ def main() -> None:
     parser.add_argument("--model-id", default="Qwen/Qwen3.8-Flash-Next")
     parser.add_argument("--progress-every", type=int, default=50)
     parser.add_argument("--preserve-tool-argument-mappings", action="store_true")
+    parser.add_argument("--sequence-lengths-only", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     result = analyze(
@@ -182,6 +197,7 @@ def main() -> None:
         model_id=args.model_id,
         progress_every=args.progress_every,
         preserve_tool_argument_mappings=args.preserve_tool_argument_mappings,
+        sequence_lengths_only=args.sequence_lengths_only,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
 
