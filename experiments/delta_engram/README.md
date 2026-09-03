@@ -20,24 +20,30 @@ though one node's existing container has a different name. This avoids unpacking
 second large framework image into the constrained node-local `/mnt/image-storage`
 volume.
 
-The checkout's lock file requires `torchao==0.14.0`, which is absent from those cached
-containers. It is installed without dependencies into
-`/mnt/data/zhihan/delta-engram/site-packages` and added to `PYTHONPATH`; the run disables
-its incompatible optional C++ extension because this baseline does not enable QAT.
+The checkout's lock file requires packages newer than those cached containers. The
+minimal missing set is installed with exact lock-file pins into
+`/mnt/data/zhihan/delta-engram/python-overlay` and added to `PYTHONPATH`; the run disables
+TorchAO's incompatible optional C++ extension because this baseline does not enable QAT.
 
-1. Run the one-GPU environment and dataset probe:
+1. Bootstrap the shared Python overlay (safe to rerun):
+
+   ```bash
+   sbatch experiments/delta_engram/bootstrap_python_overlay.sbatch
+   ```
+
+2. Run the one-GPU environment and dataset probe:
 
    ```bash
    sbatch experiments/delta_engram/nebius_env_probe.sbatch
    ```
 
-2. After the probe succeeds, run a two-step EP32 baseline without checkpoint I/O:
+3. After the probe succeeds, run a two-step EP32 baseline without checkpoint I/O:
 
    ```bash
    sbatch experiments/delta_engram/nebius_ple_baseline.sbatch 2 false
    ```
 
-3. A later acceptance run enables native DCP after the optimizer-step baseline is
+4. A later acceptance run enables native DCP after the optimizer-step baseline is
    stable:
 
    ```bash

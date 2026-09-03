@@ -32,7 +32,7 @@ srun --nodes=1 --ntasks=1 --gpus-per-node=1 --cpus-per-task=16 --mem=64G \
   bash -lc '
     set +u
     set -eo pipefail
-    export PYTHONPATH=/workspace:/mnt/data/zhihan/delta-engram/site-packages
+    export PYTHONPATH=/workspace:/mnt/data/zhihan/delta-engram/python-overlay
     export PYTHONNOUSERSITE=1
     export TORCHAO_SKIP_LOADING_SO_FILES=1
     export HF_HOME=/mnt/data/zhihan/hf_cache
