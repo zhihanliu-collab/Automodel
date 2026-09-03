@@ -25,6 +25,8 @@ srun --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=16G \
     set -eo pipefail
     python -m pip install --no-deps --upgrade \
       --target=/mnt/data/zhihan/delta-engram/python-overlay \
+      fla-core==0.4.2 \
+      flash-linear-attention==0.4.2 \
       torchao==0.14.0 \
       mlflow==3.15.1 \
       mlflow-skinny==3.15.1 \
@@ -49,4 +51,7 @@ srun --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=16G \
       threadpoolctl==3.6.0 \
       prettytable==3.17.0 \
       databricks-sdk==0.73.0
+
+    PYTHONPATH=/mnt/data/zhihan/delta-engram/python-overlay \
+      python -c "from fla.modules.convolution import causal_conv1d; from fla.ops.cp import build_cp_context; from fla.ops.gated_delta_rule import chunk_gated_delta_rule; print(\"FLA CP imports OK\")"
   '
