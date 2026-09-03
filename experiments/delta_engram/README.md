@@ -65,3 +65,18 @@ remain those of the upstream recipe.
 
 The B200 and H200 partitions use different InfiniBand fabrics. These scripts always
 select the `b200` partition and never use `main`.
+
+## Stage 2: Delta-Engram smoke
+
+`nebius_delta_smoke.sbatch` enables the append-only branch with the proposal's
+default one-million nominal rows per head. It freezes the complete base model
+and unfreezes only the Delta table plus Delta-PLE `key_proj`/`value_proj`.
+The reader uses `1e-4` peak LR and the table uses a 10x multiplier with no
+weight decay.
+
+```bash
+sbatch experiments/delta_engram/nebius_delta_smoke.sbatch 2 false 1000000
+```
+
+For fast architecture debugging, the third argument may reduce the nominal
+rows per head. Acceptance and Odoo runs must use `1000000`.
