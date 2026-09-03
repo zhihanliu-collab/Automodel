@@ -64,13 +64,17 @@ def _threshold_stats(lengths: list[int], max_context: int) -> ThresholdStats:
     }
 
 
-def analyze(*, dataset_path: Path, model_id: str, progress_every: int) -> dict[str, object]:
+def analyze(
+    *, dataset_path: Path, model_id: str, progress_every: int, preserve_tool_argument_mappings: bool
+) -> dict[str, object]:
     """Render a chat JSONL with the model template and calculate length statistics.
 
     Args:
         dataset_path: Local OpenAI-format JSON or JSONL dataset.
         model_id: Hugging Face tokenizer identifier or local tokenizer path.
         progress_every: Log progress after this many samples; zero disables it.
+        preserve_tool_argument_mappings: Render raw JSONL rows directly so Qwen3.8
+            receives tool-call arguments as mappings instead of JSON strings.
 
     Returns:
         JSON-serializable corpus length and supervision statistics.
@@ -79,22 +83,40 @@ def analyze(*, dataset_path: Path, model_id: str, progress_every: int) -> dict[s
     if not tokenizer.chat_template:
         raise RuntimeError(f"{model_id} tokenizer has no chat template")
 
-    dataset = ChatDataset(
-        path_or_dataset_id=str(dataset_path),
-        tokenizer=tokenizer,
-        seq_length=None,
-        truncation=False,
-        padding="do_not_pad",
-        mask_history=False,
-        mask_reasoning_content=False,
-    )
+    if preserve_tool_argument_mappings:
+        rows = [json.loads(line) for line in dataset_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        dataset_length = len(rows)
+    else:
+        rows = []
+        dataset = ChatDataset(
+            path_or_dataset_id=str(dataset_path),
+            tokenizer=tokenizer,
+            seq_length=None,
+            truncation=False,
+            padding="do_not_pad",
+            mask_history=False,
+            mask_reasoning_content=False,
+        )
+        dataset_length = len(dataset)
     sequence_lengths: list[int] = []
     supervised_lengths: list[int] = []
     supervised_runs: list[int] = []
-    for index in range(len(dataset)):
-        sample = dataset[index]
-        labels = sample["labels"]
-        supervised = [label != -100 for label in labels]
+    for index in range(dataset_length):
+        if preserve_tool_argument_mappings:
+            row = rows[index]
+            sample = tokenizer.apply_chat_template(
+                row["messages"],
+                tools=row.get("tools"),
+                tokenize=True,
+                return_dict=True,
+                return_assistant_tokens_mask=True,
+                padding=False,
+                truncation=False,
+            )
+            supervised = [bool(value) for value in sample["assistant_masks"]]
+        else:
+            sample = dataset[index]
+            supervised = [label != -100 for label in sample["labels"]]
         run_count = sum(
             value and (position == 0 or not supervised[position - 1])
             for position, value in enumerate(supervised)
@@ -103,7 +125,7 @@ def analyze(*, dataset_path: Path, model_id: str, progress_every: int) -> dict[s
         supervised_lengths.append(sum(supervised))
         supervised_runs.append(run_count)
         if progress_every > 0 and (index + 1) % progress_every == 0:
-            logger.info("Rendered %d/%d samples", index + 1, len(dataset))
+            logger.info("Rendered %d/%d samples", index + 1, dataset_length)
 
     if not sequence_lengths:
         raise RuntimeError(f"Dataset is empty: {dataset_path}")
@@ -152,9 +174,15 @@ def main() -> None:
     parser.add_argument("dataset_path", type=Path)
     parser.add_argument("--model-id", default="Qwen/Qwen3.8-Flash-Next")
     parser.add_argument("--progress-every", type=int, default=50)
+    parser.add_argument("--preserve-tool-argument-mappings", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    result = analyze(dataset_path=args.dataset_path, model_id=args.model_id, progress_every=args.progress_every)
+    result = analyze(
+        dataset_path=args.dataset_path,
+        model_id=args.model_id,
+        progress_every=args.progress_every,
+        preserve_tool_argument_mappings=args.preserve_tool_argument_mappings,
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
