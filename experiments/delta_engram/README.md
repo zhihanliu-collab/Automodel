@@ -49,6 +49,13 @@ remain those of the upstream recipe.
    sbatch experiments/delta_engram/nebius_ple_baseline.sbatch 2 false
    ```
 
+   Acceptance run `4565` completed on `b200-[2-5]` from Git commit
+   `37136f24995ac1705fbd495be96f1b84f71cb40d`: both optimizer steps and
+   validation exited successfully. Step losses were `3.2910` and `3.3383`;
+   the steady-state second step reported `131.02 tokens/s` globally and
+   `90.02 GiB` peak allocated memory. The first step took 75.52 seconds
+   including compilation, while the second took about 9.4 seconds.
+
 4. A later acceptance run enables native DCP after the optimizer-step baseline is
    stable:
 
