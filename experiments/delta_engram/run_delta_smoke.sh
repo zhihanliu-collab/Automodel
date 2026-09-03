@@ -12,6 +12,10 @@ NNODES="${6:?node count is required}"
 DELTA_ROWS_PER_HEAD="${7:-1000000}"
 CHECKPOINT_TAG="${8:-delta-smoke-${SLURM_JOB_ID}}"
 RESTORE_FROM="${9:-}"
+NUM_EPOCHS="${10:-1}"
+DATASET_LIMIT="${11:-256}"
+EP_SIZE="${12:-8}"
+CP_SIZE="${13:-8}"
 GPUS_PER_NODE=8
 WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 CONFIG=examples/llm_finetune/qwen/qwen3_8_flash_next_180b_hellaswag_ep64.yaml
@@ -36,7 +40,12 @@ export CUDA_CACHE_PATH="$LOCAL_CACHE_ROOT/cuda"
 
 mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH"
 
-echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$NODE_RANK world_size=$WORLD_SIZE delta_rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM"
+if (( WORLD_SIZE % EP_SIZE != 0 || WORLD_SIZE % CP_SIZE != 0 )); then
+  echo "EP_SIZE=$EP_SIZE and CP_SIZE=$CP_SIZE must each divide WORLD_SIZE=$WORLD_SIZE" >&2
+  exit 2
+fi
+
+echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$NODE_RANK world_size=$WORLD_SIZE ep_size=$EP_SIZE cp_size=$CP_SIZE delta_rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT"
 
 RESTORE_ARGS=()
 if [[ -n "$RESTORE_FROM" ]]; then
@@ -53,7 +62,8 @@ exec torchrun \
   --model.config.delta_engram_enabled true \
   --model.config.delta_ngram_vocab_size_per_head "$DELTA_ROWS_PER_HEAD" \
   --model.backend.dispatcher torch \
-  --distributed.ep_size "$WORLD_SIZE" \
+  --distributed.ep_size "$EP_SIZE" \
+  --distributed.cp_size "$CP_SIZE" \
   --freeze_config '{"freeze_modules":[{"glob":"*"}],"unfreeze_modules":[{"glob":"*.delta_ple.ple_embedding.ngram_embedding"},{"glob":"*.delta_ple.key_proj"},{"glob":"*.delta_ple.value_proj"}]}' \
   --optimizer.lr 0.0001 \
   --optimizer.weight_decay 0.0 \
@@ -61,8 +71,9 @@ exec torchrun \
   --lr_scheduler.min_lr 0.00001 \
   --step_scheduler.global_batch_size "$WORLD_SIZE" \
   --step_scheduler.max_steps "$MAX_STEPS" \
+  --step_scheduler.num_epochs "$NUM_EPOCHS" \
   --step_scheduler.ckpt_every_steps "$MAX_STEPS" \
-  --dataset.num_samples_limit 256 \
+  --dataset.num_samples_limit "$DATASET_LIMIT" \
   --checkpoint.enabled "$CHECKPOINT_ENABLED" \
   --checkpoint.checkpoint_dir "$CHECKPOINT_DIR" \
   --checkpoint.trainable_only true \

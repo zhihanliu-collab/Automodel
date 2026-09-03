@@ -110,3 +110,17 @@ model directory and a `25 GB` optimizer directory after step 1; the frozen
 `237.20 GB` base checkpoint was not duplicated. Job `4579` loaded `4.83 GB`
 of Delta model state, restored optimizer/scheduler progress, resumed directly
 at step 2, and completed another validation and checkpoint with exit code 0.
+
+For the repeated-sample learnability diagnostic, the sixth and seventh Slurm
+arguments control the epoch count and dataset limit. This keeps the base model
+frozen while revisiting a small fixed corpus often enough to distinguish an
+actual Delta optimization signal from per-batch loss noise:
+
+```bash
+sbatch experiments/delta_engram/nebius_delta_smoke.sbatch \
+  80 false 1000000 delta-learnability '' 10 256 8 8
+```
+
+The final two arguments select expert and context parallelism. The 32-B200
+Delta experiments use EP8 + CP8 (DP4); pipeline and tensor parallelism remain
+unsupported by the native Qwen3.8-Flash-Next implementation.
