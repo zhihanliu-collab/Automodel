@@ -27,15 +27,19 @@ srun --nodes=1 --ntasks=1 --cpus-per-task=64 --mem=512G \
   --container-mounts="$CODE_ROOT:/workspace,/mnt/data:/mnt/data" \
   --container-workdir=/workspace \
   bash -lc "export PYTHONNOUSERSITE=1 HF_HOME=/mnt/data/zhihan/hf_cache; \
-    python -m experiments.delta_engram.odoo_corpus \
-      --bills-jsonl $CORPUS_ROOT/raw/odoo_offline_bills_20260817.jsonl \
-      --memory-trace $CORPUS_ROOT/raw/opus5_memory_trace.jsonl \
-      --agent-jsonl /mnt/data/jian/datasets/ccsdk_flashnext/ccsdk960_flashnext_131k.jsonl \
-      --output-dir $OUTPUT_DIR \
-      --max-context 131072 \
-      --validation-fraction 0.1 \
-      --seed 20260903 \
-      --workers $WORKERS && \
+    if [[ ! -f $OUTPUT_DIR/manifest.json ]]; then \
+      python -m experiments.delta_engram.odoo_corpus \
+        --bills-jsonl $CORPUS_ROOT/raw/odoo_offline_bills_20260817.jsonl \
+        --memory-trace $CORPUS_ROOT/raw/opus5_memory_trace.jsonl \
+        --agent-jsonl /mnt/data/jian/datasets/ccsdk_flashnext/ccsdk960_flashnext_131k.jsonl \
+        --output-dir $OUTPUT_DIR \
+        --max-context 131072 \
+        --validation-fraction 0.1 \
+        --seed 20260903 \
+        --workers $WORKERS; \
+    else \
+      echo Reusing existing cache $OUTPUT_DIR; \
+    fi && \
     python -m experiments.delta_engram.analyze_delta_hash_occupancy \
       --cache-dir $OUTPUT_DIR \
       --rows-per-head 1000000"
