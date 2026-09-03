@@ -949,6 +949,7 @@ class Checkpointer:
             quantization=bool(is_init_step and self.config.dequantize_base_checkpoint),
             device_mesh=self.moe_mesh,
             for_checkpoint_load=True,
+            is_init_step=is_init_step,
         )
         destinations_ready = time.monotonic()
         requested_bytes = sum(

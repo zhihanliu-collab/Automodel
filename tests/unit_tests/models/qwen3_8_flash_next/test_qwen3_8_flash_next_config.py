@@ -287,6 +287,22 @@ def test_invalid_hyperconnection_count_is_rejected() -> None:
         Qwen3_8_FlashNextTextConfig(hc_count=1)
 
 
+def test_delta_engram_configuration_round_trips_in_text_config() -> None:
+    config = Qwen3_8_FlashNextTextConfig(
+        delta_engram_enabled=True,
+        delta_ngram_vocab_size_per_head=12345,
+    )
+
+    payload = config.to_dict()
+    assert payload["delta_engram_enabled"] is True
+    assert payload["delta_ngram_vocab_size_per_head"] == 12345
+
+
+def test_invalid_delta_engram_capacity_is_rejected() -> None:
+    with pytest.raises(ValueError, match="delta_ngram_vocab_size_per_head must be positive"):
+        Qwen3_8_FlashNextTextConfig(delta_ngram_vocab_size_per_head=0)
+
+
 def test_qsa_attention_has_no_public_query_chunk_or_rematerialization_config() -> None:
     serialized = Qwen3_8_FlashNextTextConfig().to_dict()
 

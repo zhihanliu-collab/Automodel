@@ -57,10 +57,12 @@ from .cp import (
     shard_batch_for_qwen3_8_flash_next_cp,
 )
 from .engram import (
+    QWEN3_8_FLASH_NEXT_DELTA_LAYER_MULTIPLIERS,
     QWEN3_8_FLASH_NEXT_NGRAM_PADDED_ROWS,
     Qwen3_8_FlashNextEngramTableConfig,
     Qwen3_8_FlashNextNGramEmbedding,
     Qwen3_8_FlashNextPLELayer,
+    build_delta_ngram_layout,
 )
 from .layers import Qwen3_8_FlashNextDecoderLayer, Qwen3_8_FlashNextHyperConnection
 from .state_dict_adapter import Qwen3_8_FlashNextStateDictAdapter
@@ -120,6 +122,7 @@ class Qwen3_8_FlashNextTextModelBackend(nn.Module):
         moe_overrides: dict[str, Any] | None = None,
         engram_process_group: dist.ProcessGroup | None = None,
         engram_table_config: Qwen3_8_FlashNextEngramTableConfig | None = None,
+        delta_engram_table_config: Qwen3_8_FlashNextEngramTableConfig | None = None,
     ) -> None:
         super().__init__()
         if moe_config is not None and moe_overrides is not None:
@@ -170,6 +173,7 @@ class Qwen3_8_FlashNextTextModelBackend(nn.Module):
         self.layers = nn.ModuleDict()
         for layer_idx in range(config.num_hidden_layers):
             ple = None
+            delta_ple = None
             if (layer_idx + 1) in config.ple_layer_ids:
                 ngram_heads = (config.ngram_size - 1) * config.heads_per_ngram
                 if config.ple_embed_dim % ngram_heads != 0:
@@ -209,12 +213,58 @@ class Qwen3_8_FlashNextTextModelBackend(nn.Module):
                     backend=backend,
                     dtype=self.model_dtype,
                 )
+                if config.delta_engram_enabled:
+                    if config.ngram_size != len(QWEN3_8_FLASH_NEXT_DELTA_LAYER_MULTIPLIERS):
+                        raise ValueError(
+                            "Delta Engram currently requires ngram_size="
+                            f"{len(QWEN3_8_FLASH_NEXT_DELTA_LAYER_MULTIPLIERS)}, got {config.ngram_size}"
+                        )
+                    delta_head_sizes, delta_head_offsets, delta_padded_rows = build_delta_ngram_layout(
+                        config.delta_ngram_vocab_size_per_head,
+                        ngram_heads,
+                        alignment=config.make_ngram_vocab_size_divisible_by,
+                    )
+                    delta_table_config = delta_engram_table_config or Qwen3_8_FlashNextEngramTableConfig(
+                        num_embeddings=delta_padded_rows,
+                        embedding_dim=config.ple_embed_dim // ngram_heads,
+                        initializer_range=0.0,
+                    )
+                    required_rows = delta_head_offsets[-1] + delta_head_sizes[-1]
+                    if delta_table_config.num_embeddings < required_rows:
+                        raise ValueError(
+                            "Delta Engram table is smaller than its packed hash address space: "
+                            f"{delta_table_config.num_embeddings} < {required_rows}"
+                        )
+                    delta_table = delta_table_config.build(
+                        process_group=owner_group,
+                        dtype=self.model_dtype,
+                    )
+                    delta_embedding = Qwen3_8_FlashNextNGramEmbedding(
+                        delta_table,
+                        ngram_size=config.ngram_size,
+                        heads_per_ngram=config.heads_per_ngram,
+                        eos_token_id=config.eos_token_id,
+                        layer_multipliers=QWEN3_8_FLASH_NEXT_DELTA_LAYER_MULTIPLIERS,
+                        ngram_heads_vocab_sizes=delta_head_sizes,
+                        ngram_heads_offsets=delta_head_offsets,
+                    )
+                    delta_ple = Qwen3_8_FlashNextPLELayer(
+                        delta_embedding,
+                        hidden_size=config.hidden_size,
+                        hc_count=config.hc_count,
+                        ple_embed_dim=config.ple_embed_dim,
+                        conv_kernel_size=config.ple_conv_kernel_size,
+                        rms_norm_eps=config.rms_norm_eps,
+                        backend=backend,
+                        dtype=self.model_dtype,
+                    )
             self.layers[str(layer_idx)] = Qwen3_8_FlashNextDecoderLayer(
                 layer_idx,
                 config,
                 self.moe_config,
                 backend,
                 ple=ple,
+                delta_ple=delta_ple,
             )
 
         self.hyper_connection_mixer = Qwen3_8_FlashNextHyperConnection(
@@ -408,6 +458,10 @@ class Qwen3_8_FlashNextTextModelBackend(nn.Module):
             if layer.ple is not None:
                 layer.ple.ple_embedding.ngram_embedding.reset_parameters()
                 layer.ple.init_weights(self.config.initializer_range)
+            if layer.delta_ple is not None:
+                layer.delta_ple.init_weights(self.config.initializer_range)
+                layer.delta_ple.copy_reader_from(layer.ple)
+                layer.delta_ple.ple_embedding.ngram_embedding.zero_parameters()
         self.hyper_connection_mixer.init_weights(init_std=self.config.initializer_range)
 
 
@@ -423,6 +477,7 @@ class Qwen3_8_FlashNextModel(nn.Module):
         moe_overrides: dict[str, Any] | None = None,
         engram_process_group: dist.ProcessGroup | None = None,
         engram_table_config: Qwen3_8_FlashNextEngramTableConfig | None = None,
+        delta_engram_table_config: Qwen3_8_FlashNextEngramTableConfig | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -433,6 +488,7 @@ class Qwen3_8_FlashNextModel(nn.Module):
             moe_overrides=moe_overrides,
             engram_process_group=engram_process_group,
             engram_table_config=engram_table_config,
+            delta_engram_table_config=delta_engram_table_config,
         )
 
     def forward(
@@ -531,6 +587,7 @@ class Qwen3_8_FlashNextForConditionalGeneration(HFCheckpointingMixin, nn.Module,
         *,
         engram_process_group: dist.ProcessGroup | None = None,
         engram_table_config: Qwen3_8_FlashNextEngramTableConfig | None = None,
+        delta_engram_table_config: Qwen3_8_FlashNextEngramTableConfig | None = None,
         **kwargs: Any,
     ) -> None:
         reject_unsupported_tie_word_embeddings(type(self), config)
@@ -552,6 +609,7 @@ class Qwen3_8_FlashNextForConditionalGeneration(HFCheckpointingMixin, nn.Module,
             moe_overrides=moe_overrides,
             engram_process_group=engram_process_group,
             engram_table_config=engram_table_config,
+            delta_engram_table_config=delta_engram_table_config,
         )
         dtype = _resolve_model_dtype(config.text_config)
         self.lm_head = initialize_linear_module(
@@ -620,13 +678,16 @@ class Qwen3_8_FlashNextForConditionalGeneration(HFCheckpointingMixin, nn.Module,
         """
         parameters: set[nn.Parameter] = set()
         for layer in self.model.language_model.layers.values():
-            if layer.ple is None:
-                continue
-            table = layer.ple.ple_embedding.ngram_embedding
-            parameter = table.parallelize_weight(fsdp_mesh)
-            if id(parameter) not in {id(registered) for registered in self.parameters()}:
-                raise RuntimeError("The parallelized Engram DTensor is not registered on the Qwen3.8-Flash-Next model")
-            parameters.add(parameter)
+            for ple in (layer.ple, layer.delta_ple):
+                if ple is None:
+                    continue
+                table = ple.ple_embedding.ngram_embedding
+                parameter = table.parallelize_weight(fsdp_mesh)
+                if id(parameter) not in {id(registered) for registered in self.parameters()}:
+                    raise RuntimeError(
+                        "The parallelized Engram DTensor is not registered on the Qwen3.8-Flash-Next model"
+                    )
+                parameters.add(parameter)
         return parameters
 
     def prepare_model_inputs_for_cp(self, batch: dict[str, Any], *, num_chunks: int = 1) -> dict[str, Any]:
@@ -749,8 +810,9 @@ class Qwen3_8_FlashNextForConditionalGeneration(HFCheckpointingMixin, nn.Module,
         nn.init.trunc_normal_(self.lm_head.weight, mean=0.0, std=std, a=-3 * std, b=3 * std)
         cast_model_to_dtype(self, dtype, skip_modules=("_fp32_params",))
         for layer in self.model.language_model.layers.values():
-            if layer.ple is not None:
-                layer.ple.ple_embedding.ngram_embedding.mark_sharding_contract()
+            for ple in (layer.ple, layer.delta_ple):
+                if ple is not None:
+                    ple.ple_embedding.ngram_embedding.mark_sharding_contract()
 
 
 ModelClass = Qwen3_8_FlashNextForConditionalGeneration

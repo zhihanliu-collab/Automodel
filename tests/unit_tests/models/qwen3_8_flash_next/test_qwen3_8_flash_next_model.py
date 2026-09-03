@@ -22,7 +22,10 @@ from nemo_automodel.components.models.qwen3_8_flash_next.config import (
     Qwen3_8_FlashNextConfig,
     Qwen3_8_FlashNextTextConfig,
 )
-from nemo_automodel.components.models.qwen3_8_flash_next.engram import Qwen3_8_FlashNextEngramTableConfig
+from nemo_automodel.components.models.qwen3_8_flash_next.engram import (
+    Qwen3_8_FlashNextEngramTableConfig,
+    build_delta_ngram_layout,
+)
 from nemo_automodel.components.models.qwen3_8_flash_next.model import (
     ModelClass,
     Qwen3_8_FlashNextForConditionalGeneration,
@@ -271,3 +274,47 @@ def test_engram_owner_markers_are_restored_after_meta_materialization() -> None:
     assert torch.isfinite(table.weight).all()
     assert torch.count_nonzero(table.weight) > 0
     assert not hasattr(table.weight, "_nemo_model_owned_dtensor_spec")
+
+
+def test_delta_engram_zero_starts_with_a_copied_reader() -> None:
+    config = _tiny_config()
+    config.text_config.ple_layer_ids = [1]
+    config.text_config.ngram_size = 3
+    config.text_config.heads_per_ngram = 8
+    config.text_config.ple_embed_dim = 32
+    config.text_config.delta_engram_enabled = True
+    config.text_config.delta_ngram_vocab_size_per_head = 5
+    backend = BackendConfig(
+        linear="torch",
+        attn="sdpa",
+        experts="torch",
+        dispatcher="torch",
+        enable_hf_state_dict_adapter=False,
+    )
+    _, _, delta_rows = build_delta_ngram_layout(5, 16)
+    model = Qwen3_8_FlashNextForConditionalGeneration.from_config(
+        config,
+        moe_config=_tiny_moe_config(config.text_config),
+        backend=backend,
+        engram_table_config=Qwen3_8_FlashNextEngramTableConfig(36, 2, 0.05),
+        delta_engram_table_config=Qwen3_8_FlashNextEngramTableConfig(delta_rows, 2, 0.0),
+    )
+
+    model.initialize_weights(buffer_device=torch.device("cpu"), dtype=torch.float32)
+    layer = model.model.language_model.layers["0"]
+    assert layer.delta_ple is not None
+    delta_table = layer.delta_ple.ple_embedding.ngram_embedding
+    assert torch.count_nonzero(delta_table.weight) == 0
+    base_reader = {
+        name: parameter
+        for name, parameter in layer.ple.named_parameters()
+        if not name.startswith("ple_embedding.")
+    }
+    delta_reader = {
+        name: parameter
+        for name, parameter in layer.delta_ple.named_parameters()
+        if not name.startswith("ple_embedding.")
+    }
+    assert base_reader.keys() == delta_reader.keys()
+    for name in base_reader:
+        torch.testing.assert_close(delta_reader[name], base_reader[name], rtol=0, atol=0)

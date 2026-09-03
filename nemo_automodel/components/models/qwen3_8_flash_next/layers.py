@@ -621,6 +621,8 @@ class Qwen3_8_FlashNextDecoderLayer(nn.Module):
         backend: Attention, linear, and expert backend configuration.
         ple: Optional Engram-derived PLE module. The checkpoint installs it
             only on decoder index 1.
+        delta_ple: Optional append-only PLE module evaluated from the same
+            pre-injection HC state as ``ple``.
 
     Tensor layout:
         The first layer accepts token embeddings ``[batch, sequence, hidden]``
@@ -637,6 +639,7 @@ class Qwen3_8_FlashNextDecoderLayer(nn.Module):
         backend: BackendConfig,
         *,
         ple: nn.Module | None = None,
+        delta_ple: nn.Module | None = None,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
@@ -648,11 +651,12 @@ class Qwen3_8_FlashNextDecoderLayer(nn.Module):
         self.hidden_size = int(getattr(config, "hidden_size"))
         self.hc_count = int(getattr(config, "hc_count"))
         self.ple = ple
+        self.delta_ple = delta_ple
         # PLE's owner-sharded lookup uses mutable distributed collectives.
         # PyTorch's selective TorchDispatch checkpoint context cannot safely
         # cache those side effects, so the MoE parallelizer leaves only this
         # decoder block eager while checkpointing every other Qwen3.8-Flash-Next block.
-        self._nemo_disable_activation_checkpointing = ple is not None
+        self._nemo_disable_activation_checkpointing = ple is not None or delta_ple is not None
         if self.layer_type == "linear_attention":
             self.linear_attn = Qwen3_8_FlashNextGatedDeltaNet(config, layer_idx)
         elif self.layer_type == "full_attention":
@@ -734,8 +738,11 @@ class Qwen3_8_FlashNextDecoderLayer(nn.Module):
             padding_mask = attention_mask.bool().logical_not()
 
         hidden_states = self._expand_initial_streams(hidden_states)
+        ple_input = hidden_states
         if self.ple is not None:
-            hidden_states = hidden_states + self.ple(hidden_states, input_ids, cp_context=cp_context)
+            hidden_states = hidden_states + self.ple(ple_input, input_ids, cp_context=cp_context)
+        if self.delta_ple is not None:
+            hidden_states = hidden_states + self.delta_ple(ple_input, input_ids, cp_context=cp_context)
 
         attn_input, attn_residual = self.attn_hyper_connection.mix(hidden_states)
         if self.layer_type == "linear_attention":

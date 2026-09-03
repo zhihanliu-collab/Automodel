@@ -69,6 +69,9 @@ class Qwen3_8_FlashNextStateDictAdapter(Qwen3_5MoeStateDictAdapter):
         self._table_native_key = f"model.language_model.layers.{ple_layer_idx}.ple.ple_embedding.ngram_embedding.weight"
         self._table_hf_prefix = self._table_native_key.removesuffix(".weight")
         self._table_hf_key_pattern = re.compile(rf"{re.escape(self._table_hf_prefix)}\.shard_(\d+)\.weight")
+        self._delta_ple_native_prefix = f"model.language_model.layers.{ple_layer_idx}.delta_ple"
+        self._base_ple_native_prefix = f"model.language_model.layers.{ple_layer_idx}.ple"
+        self._delta_engram_enabled = bool(getattr(config, "delta_engram_enabled", False))
 
         self._rows_per_checkpoint_shard = engram_table.num_embeddings // self.split_ngram_parts
         start, end = int(engram_table.global_row_start), int(engram_table.global_row_end)
@@ -80,6 +83,27 @@ class Qwen3_8_FlashNextStateDictAdapter(Qwen3_5MoeStateDictAdapter):
         self._first_local_checkpoint_shard = start // self._rows_per_checkpoint_shard
         self._end_local_checkpoint_shard = end // self._rows_per_checkpoint_shard
         self._view_loaded_native_keys: set[str] = set()
+
+    def to_hf(
+        self,
+        state_dict: dict[str, Any],
+        exclude_key_regex: str | None = None,
+        quantization: bool = False,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Convert state while omitting append-only tensors from the immutable base load."""
+        if self._delta_engram_enabled and kwargs.get("is_init_step", False):
+            state_dict = {
+                key: value
+                for key, value in state_dict.items()
+                if not key.startswith(f"{self._delta_ple_native_prefix}.")
+            }
+        return super().to_hf(
+            state_dict,
+            exclude_key_regex=exclude_key_regex,
+            quantization=quantization,
+            **kwargs,
+        )
 
     @property
     def view_loaded_native_keys(self) -> set[str]:
@@ -154,4 +178,19 @@ class Qwen3_8_FlashNextStateDictAdapter(Qwen3_5MoeStateDictAdapter):
                 self._view_loaded_native_keys.add(self._table_native_key)
                 continue
             filtered_state_dict[key] = value
-        return super().from_hf(filtered_state_dict, device_mesh=device_mesh, **kwargs)
+        native_state_dict = super().from_hf(filtered_state_dict, device_mesh=device_mesh, **kwargs)
+        if self._delta_engram_enabled:
+            reader_parameter_suffixes = (
+                "key_proj.weight",
+                "value_proj.weight",
+                "norm_key.weight",
+                "norm_query.weight",
+                "norm_conv.weight",
+                "conv1d.weight",
+            )
+            for suffix in reader_parameter_suffixes:
+                base_key = f"{self._base_ple_native_prefix}.{suffix}"
+                delta_key = f"{self._delta_ple_native_prefix}.{suffix}"
+                if base_key in native_state_dict and delta_key not in native_state_dict:
+                    native_state_dict[delta_key] = native_state_dict[base_key]
+        return native_state_dict

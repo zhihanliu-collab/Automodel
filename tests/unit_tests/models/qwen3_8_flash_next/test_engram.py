@@ -35,6 +35,7 @@ from nemo_automodel.components.models.qwen3_8_flash_next.engram import (
     Qwen3_8_FlashNextEngramTableConfig,
     Qwen3_8_FlashNextNGramEmbedding,
     Qwen3_8_FlashNextPLELayer,
+    build_delta_ngram_layout,
 )
 
 
@@ -307,6 +308,45 @@ def test_ple_uses_explicit_model_dtype_and_zero_start_conv() -> None:
     assert ple.value_proj.weight.dtype == torch.bfloat16
     assert ple.conv1d.weight.dtype == torch.bfloat16
     torch.testing.assert_close(ple.conv1d.weight, torch.zeros_like(ple.conv1d.weight))
+
+
+def test_delta_layout_uses_disjoint_prime_heads_and_aligned_padding() -> None:
+    sizes, offsets, padded_rows = build_delta_ngram_layout(100, 4, alignment=32)
+
+    assert sizes == (101, 103, 107, 109)
+    assert offsets == (0, 101, 204, 311)
+    assert padded_rows == 448
+    assert padded_rows % 32 == 0
+
+
+def test_zero_delta_is_exact_and_receives_first_step_table_gradient() -> None:
+    base = _tiny_ple()
+    delta = _tiny_ple()
+    delta.copy_reader_from(base)
+    with torch.no_grad():
+        delta.ple_embedding.ngram_embedding.weight.zero_()
+
+    input_ids = torch.tensor([[10, 11, 12]])
+    hidden_states = torch.randn(1, 3, 4, requires_grad=True)
+    base_output = hidden_states + base(hidden_states, input_ids)
+    delta_output = base_output + delta(hidden_states, input_ids)
+
+    torch.testing.assert_close(delta_output, base_output, rtol=0, atol=0)
+    delta_output.square().mean().backward()
+    table = delta.ple_embedding.ngram_embedding
+    assert table.weight.grad is not None
+    assert torch.count_nonzero(table.weight.grad) > 0
+    assert delta.key_proj.weight.grad is not None
+    assert delta.value_proj.weight.grad is not None
+    assert torch.count_nonzero(delta.key_proj.weight.grad) == 0
+    assert torch.count_nonzero(delta.value_proj.weight.grad) == 0
+
+    with torch.no_grad():
+        table.weight.add_(table.weight.grad, alpha=-0.1)
+    delta.zero_grad(set_to_none=True)
+    second_output = base_output.detach() + delta(hidden_states.detach(), input_ids)
+    second_output.square().mean().backward()
+    assert torch.count_nonzero(delta.value_proj.weight.grad) > 0
 
 
 def test_local_engram_table_matches_torch_embedding_forward_and_backward() -> None:

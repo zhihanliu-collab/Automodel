@@ -565,6 +565,56 @@ def test_table_export_honors_exclude_regex(
     assert set(converted) == {f"{_TABLE_PREFIX}.shard_3.weight"}
 
 
+def test_base_init_omits_delta_state_but_regular_export_keeps_it(
+    text_config: Qwen3_8_FlashNextTextConfig,
+    moe_config: MoEConfig,
+    backend: BackendConfig,
+    table: Qwen3_8_FlashNextOwnerShardedEmbedding,
+) -> None:
+    text_config.delta_engram_enabled = True
+    delta_key = "model.language_model.layers.1.delta_ple.value_proj.weight"
+    delta_weight = torch.ones(3, 3)
+    delta_adapter = Qwen3_8_FlashNextStateDictAdapter(
+        config=text_config,
+        moe_config=moe_config,
+        backend=backend,
+        engram_table=table,
+        dtype=torch.float32,
+    )
+
+    init_destinations = delta_adapter.to_hf({delta_key: delta_weight}, is_init_step=True)
+    checkpoint_state = delta_adapter.to_hf({delta_key: delta_weight}, is_init_step=False)
+
+    assert init_destinations == {}
+    assert checkpoint_state == {delta_key: delta_weight}
+
+
+def test_base_reader_weights_seed_missing_delta_reader(
+    text_config: Qwen3_8_FlashNextTextConfig,
+    moe_config: MoEConfig,
+    backend: BackendConfig,
+    table: Qwen3_8_FlashNextOwnerShardedEmbedding,
+) -> None:
+    text_config.delta_engram_enabled = True
+    delta_adapter = Qwen3_8_FlashNextStateDictAdapter(
+        config=text_config,
+        moe_config=moe_config,
+        backend=backend,
+        engram_table=table,
+        dtype=torch.float32,
+    )
+    base_key = "model.language_model.layers.1.ple.value_proj.weight"
+    delta_key = "model.language_model.layers.1.delta_ple.value_proj.weight"
+    base_weight = torch.arange(9, dtype=torch.float32).reshape(3, 3)
+
+    seeded = delta_adapter.from_hf({base_key: base_weight})
+    explicit_delta = torch.full((3, 3), 7.0)
+    restored = delta_adapter.from_hf({base_key: base_weight, delta_key: explicit_delta})
+
+    assert seeded[delta_key] is seeded[base_key]
+    assert restored[delta_key] is explicit_delta
+
+
 def test_hf_storage_reader_writes_only_owned_shards_through_views(
     tmp_path: Path,
     adapter: Qwen3_8_FlashNextStateDictAdapter,

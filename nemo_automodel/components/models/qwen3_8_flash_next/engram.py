@@ -77,6 +77,62 @@ QWEN3_8_FLASH_NEXT_NGRAM_HEAD_OFFSETS = (
     300001275,
 )
 QWEN3_8_FLASH_NEXT_NGRAM_PADDED_ROWS = 320001536
+QWEN3_8_FLASH_NEXT_DELTA_LAYER_MULTIPLIERS = (
+    6364136223846793005,
+    1442695040888963407,
+    3202034522624059733,
+)
+
+
+def _is_prime(value: int) -> bool:
+    """Return whether a small positive integer is prime."""
+    if value < 2:
+        return False
+    if value % 2 == 0:
+        return value == 2
+    limit = math.isqrt(value)
+    return all(value % divisor for divisor in range(3, limit + 1, 2))
+
+
+def _next_prime_at_least(value: int) -> int:
+    """Return the first prime greater than or equal to ``value``."""
+    candidate = max(int(value), 2)
+    if candidate > 2 and candidate % 2 == 0:
+        candidate += 1
+    while not _is_prime(candidate):
+        candidate += 1 if candidate == 2 else 2
+    return candidate
+
+
+def build_delta_ngram_layout(
+    rows_per_head: int,
+    ngram_heads: int,
+    *,
+    alignment: int = 128,
+) -> tuple[tuple[int, ...], tuple[int, ...], int]:
+    """Build deterministic independent hash ranges for an append-only Delta Engram.
+
+    ``rows_per_head`` is a nominal capacity. Every head receives a distinct
+    prime modulus at or just above that value, and the packed table is padded
+    only at its tail. Hash addresses never use the padding rows.
+    """
+    if rows_per_head <= 0:
+        raise ValueError(f"rows_per_head must be positive, got {rows_per_head}")
+    if ngram_heads <= 0:
+        raise ValueError(f"ngram_heads must be positive, got {ngram_heads}")
+    if alignment <= 0:
+        raise ValueError(f"alignment must be positive, got {alignment}")
+
+    sizes = []
+    candidate = rows_per_head
+    for _ in range(ngram_heads):
+        prime = _next_prime_at_least(candidate)
+        sizes.append(prime)
+        candidate = prime + 1
+    offsets = tuple(sum(sizes[:head]) for head in range(ngram_heads))
+    unpadded_rows = sum(sizes)
+    padded_rows = ((unpadded_rows + alignment - 1) // alignment) * alignment
+    return tuple(sizes), offsets, padded_rows
 
 
 def _fixed_capacity_all_to_all(
@@ -435,6 +491,12 @@ class Qwen3_8_FlashNextOwnerShardedEmbedding(nn.Module):
         """Initialize the rank-local weight with a finite normal distribution."""
         local_weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
         nn.init.normal_(local_weight, mean=0.0, std=self.initializer_range)
+
+    @torch.no_grad()
+    def zero_parameters(self) -> None:
+        """Set every rank-local row to zero without gathering the global table."""
+        local_weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
+        local_weight.zero_()
 
     def _validate_global_ids(self, global_ids: torch.Tensor) -> None:
         """Validate IDs symmetrically before any variable-sized collective.
@@ -1165,3 +1227,26 @@ class Qwen3_8_FlashNextPLELayer(nn.Module):
         self.norm_query.reset_parameters()
         self.norm_conv.reset_parameters()
         nn.init.zeros_(self.conv1d.weight)
+
+    @torch.no_grad()
+    def copy_reader_from(self, source: Qwen3_8_FlashNextPLELayer) -> None:
+        """Copy dense reader parameters while retaining this branch's own hash table."""
+        if not isinstance(source, Qwen3_8_FlashNextPLELayer):
+            raise TypeError(f"source must be a Qwen3_8_FlashNextPLELayer, got {type(source).__name__}")
+        source_parameters = {
+            name: parameter
+            for name, parameter in source.named_parameters()
+            if not name.startswith("ple_embedding.")
+        }
+        target_parameters = {
+            name: parameter
+            for name, parameter in self.named_parameters()
+            if not name.startswith("ple_embedding.")
+        }
+        if source_parameters.keys() != target_parameters.keys():
+            raise ValueError(
+                "PLE reader parameter layouts differ: "
+                f"source={sorted(source_parameters)} target={sorted(target_parameters)}"
+            )
+        for name, target in target_parameters.items():
+            target.copy_(source_parameters[name])

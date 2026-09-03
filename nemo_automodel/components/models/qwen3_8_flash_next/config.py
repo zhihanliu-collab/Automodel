@@ -81,6 +81,8 @@ class Qwen3_8_FlashNextTextConfig(PretrainedConfig):
         ngram_vocab_size_base: int = 20000000,
         make_ngram_vocab_size_divisible_by: int = 128,
         split_ngram_parts: int = 128,
+        delta_engram_enabled: bool = False,
+        delta_ngram_vocab_size_per_head: int = 1000000,
         # QSA indexer.
         indexer_budget: int = 2048,
         indexer_compress_ratio: int = 4,
@@ -98,6 +100,13 @@ class Qwen3_8_FlashNextTextConfig(PretrainedConfig):
     ) -> None:
         if hc_count <= 1:
             raise ValueError(f"Qwen3.8-Flash-Next requires hc_count > 1, got {hc_count}.")
+        if not isinstance(delta_engram_enabled, bool):
+            raise TypeError(f"delta_engram_enabled must be a bool, got {type(delta_engram_enabled).__name__}")
+        if delta_ngram_vocab_size_per_head <= 0:
+            raise ValueError(
+                "delta_ngram_vocab_size_per_head must be positive, got "
+                f"{delta_ngram_vocab_size_per_head}"
+            )
 
         if rope_parameters is not None:
             rope_parameters = dict(rope_parameters)
@@ -205,6 +214,8 @@ class Qwen3_8_FlashNextTextConfig(PretrainedConfig):
         self.ngram_vocab_size_base = ngram_vocab_size_base
         self.make_ngram_vocab_size_divisible_by = make_ngram_vocab_size_divisible_by
         self.split_ngram_parts = split_ngram_parts
+        self.delta_engram_enabled = delta_engram_enabled
+        self.delta_ngram_vocab_size_per_head = delta_ngram_vocab_size_per_head
 
         self.indexer_budget = indexer_budget
         self.indexer_compress_ratio = indexer_compress_ratio
@@ -317,6 +328,8 @@ class Qwen3_8_FlashNextConfig(PretrainedConfig):
         vision_end_token_id: int = 248054,
         language_model_only: bool = False,
         tie_word_embeddings: bool = False,
+        delta_engram_enabled: bool | None = None,
+        delta_ngram_vocab_size_per_head: int | None = None,
         rope_parameters: dict[str, Any] | None = None,
         architectures: list[str] | None = None,
         **kwargs: Any,
@@ -341,6 +354,17 @@ class Qwen3_8_FlashNextConfig(PretrainedConfig):
             text_config = Qwen3_8_FlashNextTextConfig(**text_config)
         elif text_config is None:
             text_config = Qwen3_8_FlashNextTextConfig(**text_kwargs)
+        if delta_engram_enabled is not None:
+            if not isinstance(delta_engram_enabled, bool):
+                raise TypeError(f"delta_engram_enabled must be a bool, got {type(delta_engram_enabled).__name__}")
+            text_config.delta_engram_enabled = delta_engram_enabled
+        if delta_ngram_vocab_size_per_head is not None:
+            if delta_ngram_vocab_size_per_head <= 0:
+                raise ValueError(
+                    "delta_ngram_vocab_size_per_head must be positive, got "
+                    f"{delta_ngram_vocab_size_per_head}"
+                )
+            text_config.delta_ngram_vocab_size_per_head = delta_ngram_vocab_size_per_head
 
         self.text_config = text_config
         self.vision_config = vision_config
