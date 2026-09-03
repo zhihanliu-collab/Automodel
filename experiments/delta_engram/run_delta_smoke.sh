@@ -14,12 +14,13 @@ CHECKPOINT_TAG="${8:-delta-smoke-${SLURM_JOB_ID}}"
 RESTORE_FROM="${9:-}"
 NUM_EPOCHS="${10:-1}"
 DATASET_LIMIT="${11:-256}"
-EP_SIZE="${12:-8}"
+EP_SIZE="${12:-16}"
 CP_SIZE="${13:-1}"
 READER_LR="${14:-0.00001}"
 TABLE_LR_MULT="${15:-10.0}"
 LR_WARMUP_STEPS="${16:-2}"
 MIN_LR="${17:-0.000001}"
+VAL_EVERY_STEPS="${18:-100}"
 GPUS_PER_NODE=8
 WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 CONFIG=examples/llm_finetune/qwen/qwen3_8_flash_next_180b_hellaswag_ep64.yaml
@@ -49,7 +50,7 @@ if (( WORLD_SIZE % EP_SIZE != 0 || WORLD_SIZE % CP_SIZE != 0 )); then
   exit 2
 fi
 
-echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$NODE_RANK world_size=$WORLD_SIZE ep_size=$EP_SIZE cp_size=$CP_SIZE delta_rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT reader_lr=$READER_LR table_lr_mult=$TABLE_LR_MULT lr_warmup_steps=$LR_WARMUP_STEPS min_lr=$MIN_LR"
+echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$NODE_RANK world_size=$WORLD_SIZE ep_size=$EP_SIZE cp_size=$CP_SIZE delta_rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT reader_lr=$READER_LR table_lr_mult=$TABLE_LR_MULT lr_warmup_steps=$LR_WARMUP_STEPS min_lr=$MIN_LR val_every_steps=$VAL_EVERY_STEPS"
 
 RESTORE_ARGS=()
 if [[ -n "$RESTORE_FROM" ]]; then
@@ -78,6 +79,7 @@ exec torchrun \
   --step_scheduler.max_steps "$MAX_STEPS" \
   --step_scheduler.num_epochs "$NUM_EPOCHS" \
   --step_scheduler.ckpt_every_steps "$MAX_STEPS" \
+  --step_scheduler.val_every_steps "$VAL_EVERY_STEPS" \
   --dataset.num_samples_limit "$DATASET_LIMIT" \
   --checkpoint.enabled "$CHECKPOINT_ENABLED" \
   --checkpoint.checkpoint_dir "$CHECKPOINT_DIR" \

@@ -122,7 +122,8 @@ sbatch experiments/delta_engram/nebius_delta_smoke.sbatch \
 ```
 
 Arguments 8 and 9 select expert and context parallelism; arguments 10--13 select
-the Delta-PLE reader LR, Delta-table LR multiplier, warmup steps, and minimum LR. Job `4583`
+the Delta-PLE reader LR, Delta-table LR multiplier, warmup steps, and minimum LR.
+Argument 14 optionally sets the validation interval. Job `4583`
 verified that EP8 + CP8 (DP4) can execute complete optimizer steps, but its first
 two eight-step epoch means rose from `4.1616` to `5.2330` at reader/table peak LRs
 of `1e-4`/`1e-3`, so that unstable run was stopped. The lower-LR diagnostic uses
@@ -139,6 +140,22 @@ overshoot, the final epoch was 26.5% below the first. Steps 2--39 averaged
 gradient accumulation 1. This establishes a finite, decreasing-loss Delta-only
 optimization signal; the HellaSwag repetition is a mechanism diagnostic rather
 than an Odoo knowledge result.
+
+For this short-sequence diagnostic, an eight-step topology benchmark (`4607`)
+showed that EP16 + CP1 averaged `430.89` global label tokens/s over steps 2--7,
+versus `396.02` tokens/s over the matching steps of EP8 + CP1: an 8.8% gain.
+Peak allocated memory reported by the trainer also decreased from `14.28 GiB`
+to `13.99 GiB`. Delta smoke jobs therefore default to EP16 + CP1; EP32 is not
+used.
+
+EP16 + CP2 job `4608` was rejected for this workload. It initialized all 32
+ranks and entered training with gradient accumulation 2, but did not complete
+step 0 after more than seven minutes in the step while most GPUs were idle. The
+job was cancelled after 11 minutes rather than spending more cluster time on a
+clearly inferior short-sequence configuration. This does not mean context
+parallelism is unsupported: job `4583` completed 16 optimizer steps with EP8 +
+CP8. It means CP should be selected from a separate long-sequence benchmark;
+these HellaSwag measurements cannot determine the best 256K topology.
 
 An attempted optional `causal-conv1d==1.6.0` CUDA fast-path install built a valid
 extension but changed import order such that NeMo's custom Qwen3.8 config was not
