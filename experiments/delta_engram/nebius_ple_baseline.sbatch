@@ -5,7 +5,7 @@
 #SBATCH --nodelist=b200-[2-5]
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=8
-#SBATCH --cpus-per-task=64
+#SBATCH --cpus-per-task=32
 #SBATCH --mem=1000G
 #SBATCH --time=06:00:00
 #SBATCH --no-requeue
@@ -27,7 +27,7 @@ git -C "$CODE_ROOT" status --short --branch
 git -C "$CODE_ROOT" rev-parse HEAD
 
 srun --nodes="$SLURM_NNODES" --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
-  --gpus-per-node=8 --cpus-per-task=64 --mem=1000G \
+  --gpus-per-node=8 --cpus-per-task=32 --mem=1000G \
   --container-name="$CONTAINER_NAME" \
   --container-mounts="$CODE_ROOT:/workspace,/mnt/data:/mnt/data" \
   --container-workdir=/workspace \
