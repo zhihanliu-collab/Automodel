@@ -222,6 +222,20 @@ def test_load_openai_messages_local_skip_invalid_samples(tmp_path):
     assert rows[1]["messages"][0]["content"] == "ok-2"
 
 
+def test_load_openai_messages_local_shuffle_and_slice(tmp_path):
+    jsonl = tmp_path / "data.jsonl"
+    rows = [{"messages": [{"role": "user", "content": str(i)}]} for i in range(10)]
+    jsonl.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+    full_shuffled = tcd._load_openai_messages(str(jsonl), split="train", shuffle_seed=42)
+    sliced = tcd._load_openai_messages(str(jsonl), split="train[2:6]", shuffle_seed=42)
+    assert sliced == full_shuffled[2:6]
+    assert sliced != rows[2:6]
+
+    with pytest.raises(ValueError, match="single 'train' split"):
+        tcd._load_openai_messages(str(jsonl), split="validation")
+
+
 def test_load_openai_messages_hf_shuffle_and_slice(monkeypatch):
     """Verify that HF datasets are shuffled before slicing."""
     monkeypatch.setattr(tcd, "_is_hf_repo_id", lambda v: True)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -184,6 +185,19 @@ def _load_openai_messages(
 
     for f in files:
         _read_file(f)
+
+    # Match the Hub/Parquet behavior for local JSON corpora.  This is
+    # especially useful for very large tool traces where materializing
+    # separate train/validation JSONL copies is wasteful.
+    base_split, sl = _parse_split_slice(split)
+    if base_split not in (None, "train"):
+        raise ValueError(
+            f"Local JSON/JSONL files expose a single 'train' split, got split={split!r}"
+        )
+    if shuffle_seed is not None:
+        random.Random(shuffle_seed).shuffle(rows)
+    if sl is not None:
+        rows = rows[sl]
 
     return rows
 
