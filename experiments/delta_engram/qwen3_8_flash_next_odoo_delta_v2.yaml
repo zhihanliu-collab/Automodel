@@ -1,0 +1,172 @@
+# Delta-Engram v2: exact-dictionary Delta table + LoRA-style alpha on the v2 Odoo
+# corpus (handbook/tutorial docs, chatter threads, agentic memory edits with
+# reasoning, agent trajectories). Every validation also scores the handbook +
+# tutorial with the Delta switched off; Delta-on worse than Delta-off stops the
+# run (DeltaGateFailed) -- the failure mode of the first checkpoint.
+
+recipe: experiments.delta_engram.training_diagnostics.DeltaDiagnosticsTrainingRecipe
+
+seed: 1234
+
+step_scheduler:
+  # 32 GPUs = DP4 x CP8. One sample spans each 8-rank CP group.
+  global_batch_size: 4
+  local_batch_size: 1
+  ckpt_every_steps: 170
+  save_checkpoint_every_epoch: false
+  val_every_steps: 170
+  gc_every_steps: 10
+  num_epochs: 2
+  max_steps: 680
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 120
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: nemo_automodel.components.models.qwen3_8_flash_next.config.Qwen3_8_FlashNextConfig.from_pretrained
+    pretrained_model_name_or_path: Qwen/Qwen3.8-Flash-Next
+    name_or_path: Qwen/Qwen3.8-Flash-Next
+    language_model_only: true
+    delta_engram_enabled: true
+    delta_engram_table: exact
+    delta_exact_keys_path: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2/delta_exact_keys_train.pt
+    # LoRA-style fixed scale on the Delta branch (hidden += alpha * delta_ple(x)).
+    delta_alpha: 0.25
+  trust_remote_code: false
+  load_base_model: true
+  torch_dtype: bfloat16
+  use_liger_kernel: false
+  use_sdpa_patching: false
+  backend:
+    _target_: nemo_automodel.components.models.common.BackendConfig
+    attn: flex
+    linear: torch
+    rms_norm: torch_fp32
+    experts: torch_mm
+    dispatcher: hybridep
+    rope_fusion: false
+    fake_balanced_gate: false
+    gate_precision: float32
+    enable_hf_state_dict_adapter: true
+    enable_fsdp_optimizations: true
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: /mnt/data/zhihan/delta-engram/checkpoints/odoo-delta-v2
+  best_metric_key: agent_trajectories
+  model_save_format: safetensors
+  save_consolidated: false
+  max_recent_checkpoints: null
+
+distributed:
+  strategy: fsdp2
+  tp_size: 1
+  cp_size: 8
+  pp_size: 1
+  ep_size: 16
+  sequence_parallel: false
+  activation_checkpointing: true
+  moe:
+    reshard_after_forward: true
+    wrap_outer_model: true
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+dataset:
+  _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
+  split: train
+
+packed_sequence:
+  packed_sequence_size: 0
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn:
+    _target_: nemo_automodel.components.datasets.utils.default_collater
+    pad_seq_len_divisible: 1024
+  shuffle: true
+  group_by_length: true
+  num_workers: 2
+  persistent_workers: true
+  prefetch_factor: 2
+
+# Gate bucket: the two reference documents (one copy each; they are train-only
+# memorization targets). Scored Delta-on and Delta-off at every validation.
+validation_dataset_offline_docs:
+  _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
+  split: train
+  sources: [offline_docs]
+  unique_groups: true
+
+validation_dataset_offline_messages:
+  _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
+  split: validation
+  sources: [offline_messages]
+
+validation_dataset_memory_edits:
+  _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
+  split: validation
+  sources: [memory_edits]
+
+validation_dataset_agent_trajectories:
+  _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
+  split: validation
+  sources: [agent_trajectories]
+
+validation_dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn:
+    _target_: nemo_automodel.components.datasets.utils.default_collater
+    pad_seq_len_divisible: 1024
+  shuffle: false
+  group_by_length: true
+  # The docs gate bucket has 2 samples; drop_last would discard them under DP4.
+  drop_last: false
+  num_workers: 2
+  persistent_workers: true
+  prefetch_factor: 2
+
+optimizer:
+  _target_: transformer_engine.pytorch.optimizers.fused_adam.FusedAdam
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  # Delta-PLE K/V; the table group keeps its 10x multiplier (alpha, not LR, bounds the injection).
+  lr: 3.0e-6
+  weight_decay: 0.0
+  adam_w_mode: true
+  bias_correction: true
+  master_weights: true
+  master_weight_dtype: torch.float32
+  store_param_remainders: true
+  exp_avg_dtype: torch.float32
+  exp_avg_sq_dtype: torch.float32
+  param_group_overrides:
+    - pattern: '\.delta_ple\.ple_embedding\.ngram_embedding\.weight$'
+      lr_mult: 10.0
+      wd_mult: 0.0
+
+lr_scheduler:
+  lr_warmup_steps: 13
+  lr_decay_steps: 680
+  lr_decay_style: cosine
+  min_lr: 3.0e-7
+
+clip_grad_norm:
+  max_norm: 1.0
+
+wandb:
+  enable: true
+  project: ${oc.env:WANDB_PROJECT,delta-engram}
+  name: ${oc.env:WANDB_NAME,qwen38-odoo-delta-v2}
+  group: ${oc.env:WANDB_GROUP,odoo-delta-v2}
+  tags: [qwen3.8-flash-next, delta-engram, exact-table, alpha, odoo-v2, 131k, fsdp2, ep16, cp8, dp4]
+  dir: ${oc.env:WANDB_DIR,/mnt/data/zhihan/delta-engram/wandb}
