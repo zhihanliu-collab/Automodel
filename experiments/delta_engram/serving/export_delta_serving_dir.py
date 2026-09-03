@@ -34,6 +34,7 @@ import glob
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 from collections import defaultdict
@@ -179,8 +180,14 @@ def main() -> None:
     ap.add_argument("--base-snapshot", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--rows-per-head", type=int, default=1_000_000,
-                    help="delta_ngram_vocab_size_per_head used in training")
+                    help="delta_ngram_vocab_size_per_head used in training (hashed table)")
+    ap.add_argument("--table", choices=("hashed", "exact"), default="hashed",
+                    help="Delta table kind the checkpoint was trained with")
+    ap.add_argument("--keys", default=None, help="exact table: the delta_exact_keys_train.pt used in training")
+    ap.add_argument("--alpha", type=float, default=1.0, help="delta_alpha the checkpoint was trained with")
     args = ap.parse_args()
+    if args.table == "exact" and not args.keys:
+        ap.error("--table exact requires --keys")
 
     base = os.path.realpath(args.base_snapshot)
     with open(os.path.join(base, "config.json")) as fh:
@@ -196,11 +203,18 @@ def main() -> None:
     ple_prefix = f"model.language_model.layers.{layer}.ple."
     delta_prefix = f"model.language_model.layers.{layer}.delta_ple."
 
-    sizes, offsets, padded = build_delta_ngram_layout(args.rows_per_head, heads, alignment)
-    s_sizes, s_offsets, s_padded = sglang_layout(args.rows_per_head, heads, alignment)
-    if (sizes, offsets, padded) != (s_sizes, s_offsets, s_padded):
-        sys.exit(f"layout disagreement training={sizes, offsets, padded} sglang={s_sizes, s_offsets, s_padded}")
-    print(f"[layout] heads={heads} primes {sizes[0]}..{sizes[-1]} padded_rows={padded} shards={parts}")
+    if args.table == "exact":
+        keys = torch.load(args.keys, map_location="cpu", weights_only=True)
+        n_bi, n_tri = int(keys["bigram"].numel()), int(keys["trigram"].numel())
+        padded = ((1 + n_bi + n_tri + alignment - 1) // alignment) * alignment
+        sizes, offsets = (n_bi, n_tri), (1, 1 + n_bi)
+        print(f"[layout] exact table: bigrams={n_bi} trigrams={n_tri} padded_rows={padded} shards={parts}")
+    else:
+        sizes, offsets, padded = build_delta_ngram_layout(args.rows_per_head, heads, alignment)
+        s_sizes, s_offsets, s_padded = sglang_layout(args.rows_per_head, heads, alignment)
+        if (sizes, offsets, padded) != (s_sizes, s_offsets, s_padded):
+            sys.exit(f"layout disagreement training={sizes, offsets, padded} sglang={s_sizes, s_offsets, s_padded}")
+        print(f"[layout] heads={heads} primes {sizes[0]}..{sizes[-1]} padded_rows={padded} shards={parts}")
 
     delta = reassemble_delta(args.ckpt_model_dir, delta_prefix)
     table_key = delta_prefix + "ple_embedding.ngram_embedding.weight"
@@ -223,9 +237,10 @@ def main() -> None:
     for name in READER_COPIED_FROM_BASE:
         base_key = f"{ple_prefix}{name}.weight"
         out_tensors[f"{delta_prefix}{name}.weight"] = load_base_tensor(base, weight_map, base_key).contiguous()
-    out_tensors[delta_prefix + "ple_embedding.layer_multipliers"] = torch.tensor(DELTA_LAYER_MULTIPLIERS, dtype=torch.long)
-    out_tensors[delta_prefix + "ple_embedding.ngram_heads_vocab_sizes"] = torch.tensor(sizes, dtype=torch.long)
-    out_tensors[delta_prefix + "ple_embedding.ngram_heads_offsets"] = torch.tensor(offsets, dtype=torch.long)
+    if args.table == "hashed":
+        out_tensors[delta_prefix + "ple_embedding.layer_multipliers"] = torch.tensor(DELTA_LAYER_MULTIPLIERS, dtype=torch.long)
+        out_tensors[delta_prefix + "ple_embedding.ngram_heads_vocab_sizes"] = torch.tensor(sizes, dtype=torch.long)
+        out_tensors[delta_prefix + "ple_embedding.ngram_heads_offsets"] = torch.tensor(offsets, dtype=torch.long)
     shard_size = (padded + parts - 1) // parts
     for i in range(parts):
         chunk = table[i * shard_size : (i + 1) * shard_size]
@@ -254,7 +269,14 @@ def main() -> None:
         os.symlink(os.path.realpath(os.path.join(base, entry)), dst)
 
     text["delta_engram_enabled"] = True
-    text["delta_ngram_vocab_size_per_head"] = int(args.rows_per_head)
+    text["delta_engram_table"] = args.table
+    text["delta_alpha"] = float(args.alpha)
+    if args.table == "exact":
+        keys_dst = os.path.join(args.out, "delta_exact_keys.pt")
+        shutil.copyfile(args.keys, keys_dst)
+        text["delta_exact_keys_path"] = keys_dst
+    else:
+        text["delta_ngram_vocab_size_per_head"] = int(args.rows_per_head)
     with open(os.path.join(args.out, "config.json"), "w") as fh:
         json.dump(config, fh, indent=2)
 
@@ -278,6 +300,9 @@ def main() -> None:
         "ckpt_model_dir": os.path.realpath(args.ckpt_model_dir),
         "base_snapshot": base,
         "delta_layer": layer,
+        "table": args.table,
+        "delta_alpha": float(args.alpha),
+        "keys": os.path.realpath(args.keys) if args.keys else None,
         "layout": {"sizes": list(sizes), "offsets": list(offsets), "padded_rows": padded, "shards": parts},
         "delta_file_bytes": delta_bytes,
         "stats": stats,

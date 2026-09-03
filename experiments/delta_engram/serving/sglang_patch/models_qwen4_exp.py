@@ -779,6 +779,88 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         )
 
 
+class Qwen4ExpExactNGramEmbedding(Qwen4ExpNGramEmbedding):
+    """Exact-dictionary Delta table: one row per training n-gram (bigram, trigram heads).
+
+    Mirrors nemo_automodel's Qwen3_8_FlashNextExactNGramEmbedding: packed keys
+    ``prev*V + cur`` / ``(prev2*V + prev)*V + cur`` are located by binary search
+    in the sorted key tensors from the keys file; row 0 is the reserved zero row
+    and an absent n-gram's head output is multiplied by zero. Two heads of
+    ``ple_embed_dim // 2`` values each replace the 16 hashed heads.
+    """
+
+    def __init__(
+        self,
+        config: Qwen4ExpTextConfig,
+        embedding_dim: int,
+        ple_layer_index: int = 0,
+        quant_config: Optional[QuantizationConfig] = None,
+        keys_path: Optional[str] = None,
+    ) -> None:
+        super().__init__(config, embedding_dim, ple_layer_index=ple_layer_index, quant_config=quant_config)
+        if not keys_path:
+            raise ValueError("delta_engram_table='exact' requires delta_exact_keys_path")
+        keys = torch.load(keys_path, map_location="cpu", weights_only=True)
+        self.exact_bigram = keys["bigram"].to(torch.long).contiguous()
+        self.exact_trigram = keys["trigram"].to(torch.long).contiguous()
+        self.exact_pack_base = int(keys["pack_base"])
+        self.exact_hot_keys = None  # the parent's exact-hot masking does not apply
+        self.enable_ple_fusion = False
+        self.ngram_heads = 2
+        self.heads_per_ngram = 1
+        if self.ngram_embed_dim % 2 != 0:
+            raise ValueError(f"ple_embed_dim must be even for the exact Delta table, got {self.ngram_embed_dim}")
+        self.head_dim_per_ngram = self.ngram_embed_dim // 2
+        self.bigram_row_start = 1
+        self.trigram_row_start = 1 + int(self.exact_bigram.numel())
+        rows = self.trigram_row_start + int(self.exact_trigram.numel())
+        alignment = self.make_ngram_vocab_size_divisible_by
+        padded_rows = ((rows + alignment - 1) // alignment) * alignment
+        self.ngram_embedding = VocabParallelEmbedding(
+            padded_rows,
+            self.head_dim_per_ngram,
+            params_dtype=torch.bfloat16,
+            output_dtype=torch.bfloat16,
+            use_attn_tp_group=self.use_attn_tp_ngram,
+        )
+        self.ngram_embedding.register_buffer(
+            "weight_scale", torch.ones(1, dtype=torch.bfloat16), persistent=True
+        )
+
+    def _hash_contexts(
+        self, contexts: torch.Tensor, *, decode_sized: bool = False
+    ) -> torch.Tensor:
+        """Exact rows for the newest position of each ``[n, ngram_size]`` window.
+
+        Returns ``[n, 2]`` global rows (zero row where the n-gram is unknown) and
+        stashes the ``[n, 2]`` presence mask for ``forward`` to apply.
+        """
+        contexts = contexts.to(torch.long)
+        device = contexts.device
+        if self.exact_bigram.device != device:
+            self.exact_bigram = self.exact_bigram.to(device)
+            self.exact_trigram = self.exact_trigram.to(device)
+        shifted = [contexts] + [self._shift_right_ignore_eos(contexts, k) for k in range(1, self.ngram_size)]
+        cur = shifted[0][:, -1]
+        prev1 = shifted[1][:, -1]
+        prev2 = shifted[2][:, -1]
+        base = self.exact_pack_base
+        bi_rows, bi_found = self._exact_member_rows(self.exact_bigram, prev1 * base + cur, self.bigram_row_start)
+        tri_rows, tri_found = self._exact_member_rows(
+            self.exact_trigram, (prev2 * base + prev1) * base + cur, self.trigram_row_start
+        )
+        self._exact_hot_mask = torch.stack([bi_found, tri_found], dim=-1).to(torch.bfloat16)
+        return torch.stack([bi_rows, tri_rows], dim=-1)
+
+    @staticmethod
+    def _exact_member_rows(sorted_keys: torch.Tensor, key: torch.Tensor, row_start: int):
+        idx = torch.searchsorted(sorted_keys, key)
+        idx_c = idx.clamp_max(sorted_keys.numel() - 1)
+        found = (idx < sorted_keys.numel()) & (sorted_keys[idx_c] == key)
+        rows = torch.where(found, idx_c + row_start, torch.zeros_like(idx_c))
+        return rows, found
+
+
 @triton.jit
 def _gather_ple_embedding_from_pinned_kernel(
     weight_ptr,
@@ -947,6 +1029,7 @@ class Qwen4ExpPLELayer(nn.Module):
         conv_state_layer_id: Optional[int] = None,
         offload_embedding: Optional[bool] = None,
         exact_hot_keys_path: Optional[str] = None,
+        exact_table_keys_path: Optional[str] = None,
     ) -> None:
         super().__init__()
         # The base table (320M rows) is offloaded to pinned host memory when the
@@ -966,15 +1049,24 @@ class Qwen4ExpPLELayer(nn.Module):
         self.conv_kernel_size = config.ple_conv_kernel_size
         self.hc_count = config.hc_count
         self.hc_hidden_size = self.hidden_size * self.hc_count
-        self.ple_embedding = Qwen4ExpNGramEmbedding(
-            config,
-            self.ple_embed_dim,
-            ple_layer_index=ple_layer_index,
-            quant_config=quant_config,
-            ngram_vocab_size_base=ngram_vocab_size_base,
-            disable_hash_fusion=disable_hash_fusion,
-            exact_hot_keys_path=exact_hot_keys_path,
-        )
+        if exact_table_keys_path:
+            self.ple_embedding = Qwen4ExpExactNGramEmbedding(
+                config,
+                self.ple_embed_dim,
+                ple_layer_index=ple_layer_index,
+                quant_config=quant_config,
+                keys_path=exact_table_keys_path,
+            )
+        else:
+            self.ple_embedding = Qwen4ExpNGramEmbedding(
+                config,
+                self.ple_embed_dim,
+                ple_layer_index=ple_layer_index,
+                quant_config=quant_config,
+                ngram_vocab_size_base=ngram_vocab_size_base,
+                disable_hash_fusion=disable_hash_fusion,
+                exact_hot_keys_path=exact_hot_keys_path,
+            )
         if offload:
             self.ple_embedding.ngram_embedding = Qwen4ExpPinnedHostEmbedding(
                 self.ple_embedding.ngram_embedding
@@ -1351,8 +1443,16 @@ class Qwen4ExpLayerExtensionMixin:
                     conv_state_layer_id=config.delta_short_conv_layer_id(layer_id),
                     offload_embedding=False,
                     exact_hot_keys_path=getattr(config, "delta_exact_hot_keys_path", None),
+                    exact_table_keys_path=(
+                        getattr(config, "delta_exact_keys_path", None)
+                        if getattr(config, "delta_engram_table", "hashed") == "exact"
+                        else None
+                    ),
                 )
-                self.delta_output_scale = float(getattr(config, "delta_output_scale", 1.0))
+                # Trained scale (delta_alpha) times the optional inference-only experiment scale.
+                self.delta_output_scale = float(getattr(config, "delta_output_scale", 1.0)) * float(
+                    getattr(config, "delta_alpha", 1.0)
+                )
 
         hc_config = HyperConnectionConfig(
             hc_count=self.hc_count,

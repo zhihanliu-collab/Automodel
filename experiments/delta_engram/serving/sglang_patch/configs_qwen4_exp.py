@@ -34,6 +34,9 @@ class Qwen4ExpTextConfig(Qwen3NextConfig):
         delta_ngram_vocab_size_per_head=1000000,
         delta_exact_hot_keys_path=None,
         delta_output_scale=1.0,
+        delta_engram_table="hashed",
+        delta_exact_keys_path=None,
+        delta_alpha=1.0,
         index_share_for_mtp_iteration=True,
         rope_parameters=None,
         layer_types=None,
@@ -89,6 +92,14 @@ class Qwen4ExpTextConfig(Qwen3NextConfig):
         # output_scale = multiply the Delta branch output before it is added.
         self.delta_exact_hot_keys_path = delta_exact_hot_keys_path
         self.delta_output_scale = float(delta_output_scale)
+        # v2 training contract (delta-engram-automodel config.py): "exact" = one
+        # table row per training n-gram located through the sorted keys file;
+        # delta_alpha = the LoRA-style scale the model was trained with.
+        if delta_engram_table not in ("hashed", "exact"):
+            raise ValueError(f"delta_engram_table must be 'hashed' or 'exact', got {delta_engram_table!r}")
+        self.delta_engram_table = delta_engram_table
+        self.delta_exact_keys_path = delta_exact_keys_path
+        self.delta_alpha = float(delta_alpha)
         # MTP draft decode steps reuse the draft-extend indexer selection
         # (GLM-5.2 IndexShare); default on for Qwen4-Exp, checkpoint config
         # or --json-model-override-args can disable it.
