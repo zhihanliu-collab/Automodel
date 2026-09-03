@@ -63,6 +63,9 @@ from .engram import (
     Qwen3_8_FlashNextNGramEmbedding,
     Qwen3_8_FlashNextPLELayer,
     build_delta_ngram_layout,
+    Qwen3_8_FlashNextExactNGramEmbedding,
+    exact_ngram_table_rows,
+    load_exact_ngram_keys,
 )
 from .layers import Qwen3_8_FlashNextDecoderLayer, Qwen3_8_FlashNextHyperConnection
 from .state_dict_adapter import Qwen3_8_FlashNextStateDictAdapter
@@ -213,7 +216,42 @@ class Qwen3_8_FlashNextTextModelBackend(nn.Module):
                     backend=backend,
                     dtype=self.model_dtype,
                 )
-                if config.delta_engram_enabled:
+                if config.delta_engram_enabled and getattr(config, "delta_engram_table", "hashed") == "exact":
+                    # Exact dictionary: one row per training n-gram (two heads:
+                    # bigram, trigram), no sharing between distinct n-grams.
+                    if config.ple_embed_dim % 2 != 0:
+                        raise ValueError(f"ple_embed_dim must be even for the exact Delta table, got {config.ple_embed_dim}")
+                    exact_keys = load_exact_ngram_keys(config.delta_exact_keys_path)
+                    delta_table_config = delta_engram_table_config or Qwen3_8_FlashNextEngramTableConfig(
+                        num_embeddings=exact_ngram_table_rows(
+                            int(exact_keys["bigram"].numel()),
+                            int(exact_keys["trigram"].numel()),
+                            config.make_ngram_vocab_size_divisible_by,
+                        ),
+                        embedding_dim=config.ple_embed_dim // 2,
+                        initializer_range=0.0,
+                    )
+                    delta_table = delta_table_config.build(
+                        process_group=owner_group,
+                        dtype=self.model_dtype,
+                    )
+                    delta_embedding = Qwen3_8_FlashNextExactNGramEmbedding(
+                        delta_table,
+                        keys=exact_keys,
+                        ngram_size=config.ngram_size,
+                        eos_token_id=config.eos_token_id,
+                    )
+                    delta_ple = Qwen3_8_FlashNextPLELayer(
+                        delta_embedding,
+                        hidden_size=config.hidden_size,
+                        hc_count=config.hc_count,
+                        ple_embed_dim=config.ple_embed_dim,
+                        conv_kernel_size=config.ple_conv_kernel_size,
+                        rms_norm_eps=config.rms_norm_eps,
+                        backend=backend,
+                        dtype=self.model_dtype,
+                    )
+                elif config.delta_engram_enabled:
                     if config.ngram_size != len(QWEN3_8_FLASH_NEXT_DELTA_LAYER_MULTIPLIERS):
                         raise ValueError(
                             "Delta Engram currently requires ngram_size="
@@ -265,6 +303,7 @@ class Qwen3_8_FlashNextTextModelBackend(nn.Module):
                 backend,
                 ple=ple,
                 delta_ple=delta_ple,
+                delta_alpha=float(getattr(config, "delta_alpha", 1.0)),
             )
 
         self.hyper_connection_mixer = Qwen3_8_FlashNextHyperConnection(

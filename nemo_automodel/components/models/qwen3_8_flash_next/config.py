@@ -83,6 +83,9 @@ class Qwen3_8_FlashNextTextConfig(PretrainedConfig):
         split_ngram_parts: int = 128,
         delta_engram_enabled: bool = False,
         delta_ngram_vocab_size_per_head: int = 1000000,
+        delta_engram_table: str = "hashed",
+        delta_exact_keys_path: str | None = None,
+        delta_alpha: float = 1.0,
         # QSA indexer.
         indexer_budget: int = 2048,
         indexer_compress_ratio: int = 4,
@@ -104,6 +107,12 @@ class Qwen3_8_FlashNextTextConfig(PretrainedConfig):
             raise TypeError(f"delta_engram_enabled must be a bool, got {type(delta_engram_enabled).__name__}")
         if delta_ngram_vocab_size_per_head <= 0:
             raise ValueError(f"delta_ngram_vocab_size_per_head must be positive, got {delta_ngram_vocab_size_per_head}")
+        if delta_engram_table not in ("hashed", "exact"):
+            raise ValueError(f"delta_engram_table must be 'hashed' or 'exact', got {delta_engram_table!r}")
+        if delta_engram_table == "exact" and delta_engram_enabled and not delta_exact_keys_path:
+            raise ValueError("delta_engram_table='exact' requires delta_exact_keys_path")
+        if not (delta_alpha > 0):
+            raise ValueError(f"delta_alpha must be positive, got {delta_alpha}")
 
         if rope_parameters is not None:
             rope_parameters = dict(rope_parameters)
@@ -213,6 +222,14 @@ class Qwen3_8_FlashNextTextConfig(PretrainedConfig):
         self.split_ngram_parts = split_ngram_parts
         self.delta_engram_enabled = delta_engram_enabled
         self.delta_ngram_vocab_size_per_head = delta_ngram_vocab_size_per_head
+        # "hashed": the original multi-head hashed Delta table. "exact": one row per
+        # n-gram that occurred in the training corpus (keys file built by
+        # experiments/delta_engram/serving/build_exact_hot_keys.py); unseen
+        # n-grams read exact zero, so nothing is shared between distinct n-grams.
+        self.delta_engram_table = delta_engram_table
+        self.delta_exact_keys_path = delta_exact_keys_path
+        # LoRA-style fixed output scale on the Delta branch: hidden += alpha * delta_ple(x).
+        self.delta_alpha = float(delta_alpha)
 
         self.indexer_budget = indexer_budget
         self.indexer_compress_ratio = indexer_compress_ratio
@@ -327,6 +344,9 @@ class Qwen3_8_FlashNextConfig(PretrainedConfig):
         tie_word_embeddings: bool = False,
         delta_engram_enabled: bool | None = None,
         delta_ngram_vocab_size_per_head: int | None = None,
+        delta_engram_table: str | None = None,
+        delta_exact_keys_path: str | None = None,
+        delta_alpha: float | None = None,
         rope_parameters: dict[str, Any] | None = None,
         architectures: list[str] | None = None,
         **kwargs: Any,
@@ -361,6 +381,16 @@ class Qwen3_8_FlashNextConfig(PretrainedConfig):
                     f"delta_ngram_vocab_size_per_head must be positive, got {delta_ngram_vocab_size_per_head}"
                 )
             text_config.delta_ngram_vocab_size_per_head = delta_ngram_vocab_size_per_head
+        if delta_engram_table is not None:
+            if delta_engram_table not in ("hashed", "exact"):
+                raise ValueError(f"delta_engram_table must be 'hashed' or 'exact', got {delta_engram_table!r}")
+            text_config.delta_engram_table = delta_engram_table
+        if delta_exact_keys_path is not None:
+            text_config.delta_exact_keys_path = str(delta_exact_keys_path)
+        if delta_alpha is not None:
+            if not (float(delta_alpha) > 0):
+                raise ValueError(f"delta_alpha must be positive, got {delta_alpha}")
+            text_config.delta_alpha = float(delta_alpha)
 
         self.text_config = text_config
         self.vision_config = vision_config
@@ -397,6 +427,37 @@ class Qwen3_8_FlashNextConfig(PretrainedConfig):
         if value <= 0:
             raise ValueError(f"delta_ngram_vocab_size_per_head must be positive, got {value}")
         self.text_config.delta_ngram_vocab_size_per_head = int(value)
+
+    @property
+    def delta_engram_table(self) -> str:
+        """Expose the nested Delta table kind ('hashed' | 'exact') for config overrides."""
+        return str(self.text_config.delta_engram_table)
+
+    @delta_engram_table.setter
+    def delta_engram_table(self, value: str) -> None:
+        if value not in ("hashed", "exact"):
+            raise ValueError(f"delta_engram_table must be 'hashed' or 'exact', got {value!r}")
+        self.text_config.delta_engram_table = value
+
+    @property
+    def delta_exact_keys_path(self) -> str | None:
+        """Expose the nested exact-table keys file for config overrides."""
+        return self.text_config.delta_exact_keys_path
+
+    @delta_exact_keys_path.setter
+    def delta_exact_keys_path(self, value: str | None) -> None:
+        self.text_config.delta_exact_keys_path = None if value is None else str(value)
+
+    @property
+    def delta_alpha(self) -> float:
+        """Expose the nested Delta output scale for config overrides."""
+        return float(self.text_config.delta_alpha)
+
+    @delta_alpha.setter
+    def delta_alpha(self, value: float) -> None:
+        if not (float(value) > 0):
+            raise ValueError(f"delta_alpha must be positive, got {value}")
+        self.text_config.delta_alpha = float(value)
 
 
 class Qwen3_8_FlashNextLegacyTextConfig(Qwen3_8_FlashNextTextConfig):

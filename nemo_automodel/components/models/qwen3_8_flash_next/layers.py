@@ -623,6 +623,8 @@ class Qwen3_8_FlashNextDecoderLayer(nn.Module):
             only on decoder index 1.
         delta_ple: Optional append-only PLE module evaluated from the same
             pre-injection HC state as ``ple``.
+        delta_alpha: Fixed LoRA-style scale applied to the Delta PLE output
+            before it is added to the HC state.
 
     Tensor layout:
         The first layer accepts token embeddings ``[batch, sequence, hidden]``
@@ -640,9 +642,15 @@ class Qwen3_8_FlashNextDecoderLayer(nn.Module):
         *,
         ple: nn.Module | None = None,
         delta_ple: nn.Module | None = None,
+        delta_alpha: float = 1.0,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
+        if not (delta_alpha > 0):
+            raise ValueError(f"delta_alpha must be positive, got {delta_alpha}")
+        self.delta_alpha = float(delta_alpha)
+        # Runtime switch used by the Delta-on/off validation gate; parameters are untouched.
+        self.delta_enabled = True
         layer_types = getattr(config, "layer_types", None)
         if layer_types is None:
             block_types = getattr(config, "layers_block_type")
@@ -741,8 +749,10 @@ class Qwen3_8_FlashNextDecoderLayer(nn.Module):
         ple_input = hidden_states
         if self.ple is not None:
             hidden_states = hidden_states + self.ple(ple_input, input_ids, cp_context=cp_context)
-        if self.delta_ple is not None:
-            hidden_states = hidden_states + self.delta_ple(ple_input, input_ids, cp_context=cp_context)
+        if self.delta_ple is not None and self.delta_enabled:
+            hidden_states = hidden_states + self.delta_alpha * self.delta_ple(
+                ple_input, input_ids, cp_context=cp_context
+            )
 
         attn_input, attn_residual = self.attn_hyper_connection.mix(hidden_states)
         if self.layer_type == "linear_attention":

@@ -995,6 +995,209 @@ class Qwen3_8_FlashNextNGramEmbedding(nn.Module):
         return self._lookup_ngram_ids(global_ngram_ids[:, sequence_start:sequence_end])
 
 
+EXACT_NGRAM_PACK_BASE = 1 << 18  # > vocab_size (248k); bigram = prev*V + cur, trigram = (prev2*V + prev)*V + cur
+EXACT_NGRAM_ZERO_ROW = 0  # reserved all-zero row read by n-grams absent from the keys file
+
+
+def load_exact_ngram_keys(path: str) -> dict[str, torch.Tensor | int]:
+    """Load sorted packed n-gram keys written by ``build_exact_hot_keys.py``.
+
+    Args:
+        path: ``torch.save`` file with ``bigram``/``trigram`` sorted unique int64
+            tensors of shape ``[n_bigrams]`` / ``[n_trigrams]`` and ``pack_base``.
+
+    Returns:
+        Dict with ``bigram``, ``trigram`` (int64, CPU, sorted) and ``pack_base``.
+    """
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    bigram = payload["bigram"].to(torch.long).contiguous()
+    trigram = payload["trigram"].to(torch.long).contiguous()
+    pack_base = int(payload["pack_base"])
+    for name, keys in (("bigram", bigram), ("trigram", trigram)):
+        if keys.ndim != 1 or keys.numel() == 0:
+            raise ValueError(f"{name} keys must be a non-empty 1-D tensor, got {tuple(keys.shape)}")
+        if not bool((keys[1:] > keys[:-1]).all()):
+            raise ValueError(f"{name} keys must be strictly increasing")
+    return {"bigram": bigram, "trigram": trigram, "pack_base": pack_base}
+
+
+def exact_ngram_table_rows(num_bigrams: int, num_trigrams: int, alignment: int) -> int:
+    """Padded row count of an exact Delta table: zero row + bigram rows + trigram rows."""
+    rows = 1 + int(num_bigrams) + int(num_trigrams)
+    return ((rows + alignment - 1) // alignment) * alignment
+
+
+class Qwen3_8_FlashNextExactNGramEmbedding(nn.Module):
+    """Exact-dictionary Delta n-gram embedding: one table row per training n-gram.
+
+    Unlike :class:`Qwen3_8_FlashNextNGramEmbedding`, rows are never shared
+    between distinct n-grams. Bigram ``(prev, cur)`` and trigram
+    ``(prev2, prev, cur)`` keys are packed into int64 and located by binary
+    search in the sorted key tensors from the keys file; an n-gram absent from
+    the file reads the reserved zero row and its output is multiplied by zero, so
+    it receives exactly zero value and zero gradient. Context reads follow the
+    same EOS-segment rule as the hashed table.
+
+    Two "heads" (bigram, trigram) each own ``ple_embed_dim // 2`` values so the
+    concatenated output matches the base PLE reader width.
+
+    Args:
+        ngram_embedding: Row lookup accepting global row IDs ``[batch, sequence, 2]``
+            and returning ``[batch, sequence, 2, head_dim]``.
+        keys: Output of :func:`load_exact_ngram_keys`.
+        ngram_size: Must be 3 (bigram + trigram heads).
+        eos_token_id: Raw tokenizer ID that terminates the preceding segment.
+    """
+
+    def __init__(
+        self,
+        ngram_embedding: nn.Module,
+        *,
+        keys: dict[str, torch.Tensor | int],
+        ngram_size: int = 3,
+        eos_token_id: int = 248044,
+    ) -> None:
+        super().__init__()
+        if ngram_size != 3:
+            raise NotImplementedError(f"The exact Delta table supports ngram_size=3, got {ngram_size}")
+        self.ngram_embedding = ngram_embedding
+        self.ngram_size = ngram_size
+        self.heads_per_ngram = 1
+        self.ngram_heads = 2
+        self.eos_token_id = eos_token_id
+        self.pack_base = int(keys["pack_base"])
+        bigram = keys["bigram"]
+        trigram = keys["trigram"]
+        self.register_buffer("bigram_keys", bigram.clone(), persistent=False)
+        self.register_buffer("trigram_keys", trigram.clone(), persistent=False)
+        self.bigram_row_start = 1
+        self.trigram_row_start = 1 + int(bigram.numel())
+        # Same buffers the hashed table exposes, so diagnostics can iterate heads.
+        self.register_buffer(
+            "ngram_heads_vocab_sizes",
+            torch.tensor([int(bigram.numel()), int(trigram.numel())], dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "ngram_heads_offsets",
+            torch.tensor([self.bigram_row_start, self.trigram_row_start], dtype=torch.long),
+            persistent=False,
+        )
+        required_rows = self.trigram_row_start + int(trigram.numel())
+        if int(ngram_embedding.num_embeddings) < required_rows:
+            raise ValueError(
+                f"exact Delta table has {ngram_embedding.num_embeddings} rows but the keys need {required_rows}"
+            )
+
+    def _shift_right_after_eos(self, input_ids: torch.Tensor, shift: int) -> torch.Tensor:
+        """Token ``shift`` positions back inside the same EOS-delimited segment, else EOS.
+
+        Args:
+            input_ids: Raw tokenizer IDs of shape ``[batch, sequence]``.
+            shift: Number of preceding positions to read.
+
+        Returns:
+            Raw IDs of shape ``[batch, sequence]``.
+        """
+        return Qwen3_8_FlashNextNGramEmbedding._shift_right_after_eos(self, input_ids, shift)
+
+    @staticmethod
+    def _member_rows(sorted_keys: torch.Tensor, key: torch.Tensor, row_start: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Binary-search ``key`` in ``sorted_keys``.
+
+        Args:
+            sorted_keys: Sorted unique int64 keys of shape ``[n]``.
+            key: Packed n-gram keys of shape ``[batch, sequence]``.
+            row_start: Global table row of ``sorted_keys[0]``.
+
+        Returns:
+            ``(rows, found)``: global row IDs ``[batch, sequence]`` (zero row where
+            not found) and a boolean mask ``[batch, sequence]``.
+        """
+        index = torch.searchsorted(sorted_keys, key)
+        clamped = index.clamp_max(sorted_keys.numel() - 1)
+        found = (index < sorted_keys.numel()) & (sorted_keys[clamped] == key)
+        rows = torch.where(found, clamped + row_start, torch.full_like(clamped, EXACT_NGRAM_ZERO_ROW))
+        return rows, found
+
+    def _rows_and_mask(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Global rows and presence mask for the bigram and trigram heads.
+
+        Args:
+            input_ids: Raw tokenizer IDs of shape ``[batch, sequence]``.
+
+        Returns:
+            ``(rows, found)`` both of shape ``[batch, sequence, 2]``.
+        """
+        if input_ids.ndim != 2:
+            raise ValueError(f"input_ids must have shape [batch, sequence], got {tuple(input_ids.shape)}")
+        ids = input_ids.to(torch.long)
+        if bool((ids >= self.pack_base).any()):
+            raise ValueError(f"token id >= pack_base {self.pack_base}; keys cannot be packed")
+        prev1 = self._shift_right_after_eos(ids, 1)
+        prev2 = self._shift_right_after_eos(ids, 2)
+        bigram_rows, bigram_found = self._member_rows(self.bigram_keys, prev1 * self.pack_base + ids, self.bigram_row_start)
+        trigram_rows, trigram_found = self._member_rows(
+            self.trigram_keys, (prev2 * self.pack_base + prev1) * self.pack_base + ids, self.trigram_row_start
+        )
+        rows = torch.stack([bigram_rows, trigram_rows], dim=-1)
+        found = torch.stack([bigram_found, trigram_found], dim=-1)
+        return rows, found
+
+    def _lookup(self, rows: torch.Tensor, found: torch.Tensor) -> torch.Tensor:
+        """Look up rows and zero the heads whose n-gram is unknown.
+
+        Args:
+            rows: Global row IDs of shape ``[batch, sequence, 2]``.
+            found: Presence mask of shape ``[batch, sequence, 2]``.
+
+        Returns:
+            Concatenated head values of shape ``[batch, sequence, 2 * head_dim]``.
+        """
+        values = self.ngram_embedding(rows)
+        if values.ndim != 4 or values.shape[:-1] != rows.shape:
+            raise RuntimeError(f"exact Delta lookup returned {tuple(values.shape)} for rows {tuple(rows.shape)}")
+        values = values * found.unsqueeze(-1).to(values.dtype)
+        return values.flatten(start_dim=-2)
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Return concatenated exact-table values for raw token IDs.
+
+        Args:
+            input_ids: Raw tokenizer IDs of shape ``[batch, sequence]``.
+
+        Returns:
+            Tensor of shape ``[batch, sequence, 2 * head_dim]`` (bigram head, then trigram head).
+        """
+        rows, found = self._rows_and_mask(input_ids)
+        return self._lookup(rows, found)
+
+    def _forward_global_slice(
+        self,
+        global_input_ids: torch.Tensor,
+        *,
+        sequence_start: int,
+        sequence_end: int,
+    ) -> torch.Tensor:
+        """Resolve keys on the full sequence, then look up one local CP slice.
+
+        Args:
+            global_input_ids: Replicated raw IDs of shape ``[batch, global_sequence]``.
+            sequence_start: Inclusive global position of the requested shard.
+            sequence_end: Exclusive global position of the requested shard.
+
+        Returns:
+            Local values of shape ``[batch, sequence_end - sequence_start, 2 * head_dim]``.
+        """
+        if sequence_start < 0 or sequence_end < sequence_start or sequence_end > global_input_ids.shape[1]:
+            raise ValueError(
+                f"Invalid exact Delta PLE global slice [{sequence_start}, {sequence_end}) "
+                f"for sequence length {global_input_ids.shape[1]}"
+            )
+        rows, found = self._rows_and_mask(global_input_ids)
+        return self._lookup(rows[:, sequence_start:sequence_end], found[:, sequence_start:sequence_end])
+
+
 class Qwen3_8_FlashNextPLELayer(nn.Module):
     """Contextualize Qwen3.8-Flash-Next n-gram values and return an HC-sized delta.
 

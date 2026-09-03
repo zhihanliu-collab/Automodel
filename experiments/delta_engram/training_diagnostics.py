@@ -36,11 +36,23 @@ from nemo_automodel.shared.import_utils import safe_import
 _, wandb = safe_import("wandb")
 
 
+class DeltaGateFailed(RuntimeError):
+    """Raised when Delta-on validation loss exceeds Delta-off on the gate bucket."""
+
+
 class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
     """Add low-frequency Delta scale diagnostics to the standard train recipe.
 
     Parameter scans and activation reductions run only when validation runs.
     Ordinary steps retain the upstream recipe's logging and compute path.
+
+    Delta-on/off gate: the validation loader named by ``DELTA_GATE_VAL_NAME``
+    (default ``offline_docs``) is scored twice at every validation step, once
+    normally and once with the Delta branch switched off. The first run whose
+    on-minus-off loss exceeds ``DELTA_GATE_TOLERANCE`` (default 0.0 nats) logs
+    the gap and stops training with :class:`DeltaGateFailed`: a Delta that makes
+    text it was trained on *less* likely than the frozen base is the failure
+    mode that cost the first checkpoint 8 of 100 tasks.
     """
 
     train_loss_ema_decay = 0.9
@@ -73,6 +85,11 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         self._diag_parameter_metrics_step = -1
         self._diag_parameter_metrics: dict[str, float] = {}
         self._diag_table_module = self._diag_delta_ple.ple_embedding.ngram_embedding
+        self._diag_delta_layer = layer
+        self._gate_val_name = os.environ.get("DELTA_GATE_VAL_NAME", "offline_docs")
+        self._gate_tolerance = float(os.environ.get("DELTA_GATE_TOLERANCE", "0.0"))
+        self._gate_pending: dict[str, float] | None = None
+        self._gate_failed_message: str | None = None
         ngram_reader = self._diag_delta_ple.ple_embedding
         self._diag_head_sizes = [int(value) for value in ngram_reader.ngram_heads_vocab_sizes.tolist()]
         self._diag_head_offsets = [int(value) for value in ngram_reader.ngram_heads_offsets.tolist()]
@@ -277,9 +294,31 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         self._diag_activation_counts = defaultdict(int)
         self._diag_capture_enabled = True
         try:
-            return super()._run_validation_epoch(val_dataloader)
+            sample = super()._run_validation_epoch(val_dataloader)
         finally:
             self._diag_capture_enabled = False
+        gate_loader = self.val_dataloaders.get(self._gate_val_name)
+        if gate_loader is not None and val_dataloader is gate_loader:
+            # Second pass with the Delta branch switched off (parameters untouched).
+            self._diag_delta_layer.delta_enabled = False
+            try:
+                off_sample = super()._run_validation_epoch(val_dataloader)
+            finally:
+                self._diag_delta_layer.delta_enabled = True
+            on_loss = float(sample.metrics["val_loss"])
+            off_loss = float(off_sample.metrics["val_loss"])
+            self._gate_pending = {
+                "gate/delta_on_val_loss": on_loss,
+                "gate/delta_off_val_loss": off_loss,
+                "gate/delta_on_minus_off": on_loss - off_loss,
+                "gate/tolerance": self._gate_tolerance,
+            }
+            if on_loss - off_loss > self._gate_tolerance:
+                self._gate_failed_message = (
+                    f"Delta gate failed on {self._gate_val_name!r} at step {int(sample.step)}: "
+                    f"delta_on={on_loss:.4f} delta_off={off_loss:.4f} gap={on_loss - off_loss:+.4f} > {self._gate_tolerance}"
+                )
+        return sample
 
     def _activation_rms(self, name: str) -> float:
         value = self._diag_activation_sums.get(name)
@@ -455,7 +494,13 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             maximum = max(self._diag_latest_val_losses.values())
             log_data.metrics["retention/validation_bucket_max_minus_min"] = maximum - minimum
 
+        if val_name == self._gate_val_name and self._gate_pending is not None:
+            log_data.metrics.update(self._gate_pending)
+            self._gate_pending = None
         super().log_val_metrics(val_name, log_data, metric_logger)
+        if val_name == self._gate_val_name and self._gate_failed_message is not None:
+            # Metrics for this step are already logged; stop before the next step.
+            raise DeltaGateFailed(self._gate_failed_message)
 
         # The upstream call already sends log_data.metrics to W&B. Add a
         # compact per-bucket view when several validation suites are present.

@@ -26,9 +26,16 @@ produce exactly zero output and zero gradients.
 from __future__ import annotations
 
 import functools
+import warnings
 
 import torch
-from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
+
+# Dynamo's eager fallback for flex_attention materializes dense scores (tens of
+# GiB at 131k tokens). Training must never take it silently: turn the warning
+# into an error so the job fails at the first unfused call instead of OOM-ing
+# hundreds of steps later.
+warnings.filterwarnings("error", message="flex_attention called without torch.compile")
 
 
 @functools.cache
@@ -42,6 +49,43 @@ def _compiled_flex():
     sequence dimensions let the same fused kernel graph serve those lengths.
     """
     return torch.compile(flex_attention, dynamic=True)
+
+
+def _mark_sequence_dims_dynamic(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, block_mask: BlockMask) -> None:
+    """Mark every length-dependent axis symbolic before the compiled call.
+
+    ``dynamic=True`` alone still specializes tensor axes whose first-seen size is
+    0 or 1 and lets automatic-dynamic re-specialize BlockMask metadata (the
+    block-count axes of ``kv_indices``/``q_indices`` change with every padded
+    length), which showed up as a ``q_indices size mismatch`` recompile at the
+    second sequence length. Marking the axes explicitly pins them symbolic.
+
+    Args:
+        query: ``[B, Hq, S_q, D]`` (already permuted for the kernel).
+        key: ``[B, Hkv, S_kv, D]``.
+        value: ``[B, Hkv, S_kv, D]``.
+        block_mask: FlexAttention BlockMask whose block-count tensors are
+            ``[B, H, q_blocks]`` / ``[B, H, q_blocks, kv_blocks]`` (and the
+            transposed ``q_*`` variants).
+    """
+    torch._dynamo.maybe_mark_dynamic(query, 2)
+    torch._dynamo.maybe_mark_dynamic(key, 2)
+    torch._dynamo.maybe_mark_dynamic(value, 2)
+    for name in (
+        "kv_num_blocks",
+        "kv_indices",
+        "full_kv_num_blocks",
+        "full_kv_indices",
+        "q_num_blocks",
+        "q_indices",
+        "full_q_num_blocks",
+        "full_q_indices",
+    ):
+        tensor = getattr(block_mask, name, None)
+        if tensor is None:
+            continue
+        for dim in range(2, tensor.ndim):
+            torch._dynamo.maybe_mark_dynamic(tensor, dim)
 
 
 def _routes_to_membership(
@@ -135,10 +179,14 @@ def flex_sparse_gqa_attention(
         KV_LEN=kv_length,
         device=str(query.device),
     )
+    query_k = query.permute(0, 2, 1, 3)
+    key_k = key.permute(0, 2, 1, 3)
+    value_k = value.permute(0, 2, 1, 3)
+    _mark_sequence_dims_dynamic(query_k, key_k, value_k, block_mask)
     output = _compiled_flex()(
-        query.permute(0, 2, 1, 3),
-        key.permute(0, 2, 1, 3),
-        value.permute(0, 2, 1, 3),
+        query_k,
+        key_k,
+        value_k,
         block_mask=block_mask,
         scale=scale,
         enable_gqa=True,

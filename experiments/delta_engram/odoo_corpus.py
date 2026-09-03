@@ -416,15 +416,21 @@ class OdooCorpusDatasetConfig:
     cache_dir: str
     split: str
     sources: list[str] | None = None
+    # Keep one record per group (e.g. one copy of each repeated document) for gate loaders.
+    unique_groups: bool = False
 
     def build(self) -> "OdooCorpusDataset":
-        return OdooCorpusDataset(cache_dir=self.cache_dir, split=self.split, sources=self.sources)
+        return OdooCorpusDataset(
+            cache_dir=self.cache_dir, split=self.split, sources=self.sources, unique_groups=self.unique_groups
+        )
 
 
 class OdooCorpusDataset(Dataset):
     """Memory-mapped variable-length input/label pairs with source filtering."""
 
-    def __init__(self, *, cache_dir: str, split: str, sources: list[str] | None = None) -> None:
+    def __init__(
+        self, *, cache_dir: str, split: str, sources: list[str] | None = None, unique_groups: bool = False
+    ) -> None:
         root = Path(cache_dir)
         manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
         if manifest.get("format_version") != FORMAT_VERSION:
@@ -440,6 +446,15 @@ class OdooCorpusDataset(Dataset):
             for record in manifest["records"]
             if record["split"] == split and record["source"] in requested
         ]
+        if unique_groups:
+            seen: set[str] = set()
+            deduplicated = []
+            for record in self.records:
+                if record["group"] in seen:
+                    continue
+                seen.add(record["group"])
+                deduplicated.append(record)
+            self.records = deduplicated
         if not self.records:
             raise ValueError(f"No cached records for split={split!r}, sources={sorted(requested)}")
         self.lengths = [int(record["length"]) for record in self.records]
