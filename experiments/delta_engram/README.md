@@ -25,6 +25,12 @@ minimal missing set is installed with exact lock-file pins into
 `/mnt/data/zhihan/delta-engram/python-overlay` and added to `PYTHONPATH`; the run disables
 TorchAO's incompatible optional C++ extension because this baseline does not enable QAT.
 
+The cached container's HybridEP extension was built without multinode support. The
+baseline therefore overrides only the MoE communication dispatcher to NeMo's portable
+`torch` implementation, which uses autograd-aware NCCL collectives. The Qwen model,
+FSDP2 wrapping, expert implementation, PLE/Engram path, optimizer groups, and weights
+remain those of the upstream recipe.
+
 1. Bootstrap the shared Python overlay (safe to rerun):
 
    ```bash

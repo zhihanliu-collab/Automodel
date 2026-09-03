@@ -42,6 +42,7 @@ exec torchrun \
   --rdzv-backend=c10d \
   --rdzv-endpoint="$MASTER_ADDR:$MASTER_PORT" \
   -m nemo_automodel.cli.app "$CONFIG" \
+  --model.backend.dispatcher torch \
   --distributed.ep_size "$WORLD_SIZE" \
   --step_scheduler.global_batch_size "$WORLD_SIZE" \
   --step_scheduler.max_steps "$MAX_STEPS" \
