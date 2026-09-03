@@ -82,20 +82,20 @@ def _backend() -> BackendConfig:
     )
 
 
-def test_flex_qsa_raises_accumulated_recompile_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(torch._dynamo.config, "accumulated_recompile_limit", 256)
+def test_flex_qsa_compiles_once_with_dynamic_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
+    compile_calls = []
+    sentinel = object()
 
-    qwen3_8_flash_next_flex_qsa._ensure_flex_compile_budget()
+    def record_compile(function, *, dynamic):
+        compile_calls.append((function, dynamic))
+        return sentinel
 
-    assert torch._dynamo.config.accumulated_recompile_limit == 1024
+    qwen3_8_flash_next_flex_qsa._compiled_flex.cache_clear()
+    monkeypatch.setattr(torch, "compile", record_compile)
 
-
-def test_flex_qsa_preserves_larger_accumulated_recompile_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(torch._dynamo.config, "accumulated_recompile_limit", 2048)
-
-    qwen3_8_flash_next_flex_qsa._ensure_flex_compile_budget()
-
-    assert torch._dynamo.config.accumulated_recompile_limit == 2048
+    assert qwen3_8_flash_next_flex_qsa._compiled_flex() is sentinel
+    assert qwen3_8_flash_next_flex_qsa._compiled_flex() is sentinel
+    assert compile_calls == [(qwen3_8_flash_next_flex_qsa.flex_attention, True)]
 
 
 def _freqs(batch_size: int, sequence_length: int, rotary_width: int = 4) -> torch.Tensor:
