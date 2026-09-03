@@ -37,7 +37,13 @@ def echo(hp, model, text):
     req = urllib.request.Request(f"http://{hp}/v1/completions", data=body, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=300) as r:
         lp = json.load(r)["choices"][0]["logprobs"]
-    return lp["tokens"][:-1], lp["token_logprobs"][:-1], lp["text_offset"][:-1]
+    toks, lps = lp["tokens"][:-1], lp["token_logprobs"][:-1]
+    # SGLang returns text_offset=-1 for echoed prompts; rebuild char offsets from the tokens.
+    offs, pos = [], 0
+    for tok in toks:
+        offs.append(pos)
+        pos += len(tok)
+    return toks, lps, offs
 
 
 def main():
@@ -53,7 +59,7 @@ def main():
     totals = {t: [0.0, 0] for t, _ in eps}
     for label, s in STRINGS.items():
         prompt = f"{label}: {s}\nRepeat exactly: {s}"
-        start = len(prompt) - len(s)
+        start = len(prompt) - len(s) - 1  # a token may straddle the space before S
         row = f"{label:12s}"
         worst = []
         n_out = None
