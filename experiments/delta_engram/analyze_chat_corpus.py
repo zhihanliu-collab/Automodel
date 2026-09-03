@@ -71,6 +71,7 @@ def analyze(
     progress_every: int,
     preserve_tool_argument_mappings: bool,
     sequence_lengths_only: bool,
+    limit: int | None = None,
 ) -> dict[str, object]:
     """Render a chat JSONL with the model template and calculate length statistics.
 
@@ -82,6 +83,7 @@ def analyze(
             receives tool-call arguments as mappings instead of JSON strings.
         sequence_lengths_only: Skip assistant-mask construction and only measure
             context lengths. Useful for templates without generation blocks.
+        limit: Optional prefix sample count for fast validation.
 
     Returns:
         JSON-serializable corpus length and supervision statistics.
@@ -107,6 +109,10 @@ def analyze(
             preserve_tool_argument_mappings=preserve_tool_argument_mappings,
         )
         dataset_length = len(dataset)
+    if limit is not None:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        dataset_length = min(dataset_length, limit)
     sequence_lengths: list[int] = []
     supervised_lengths: list[int] = []
     supervised_runs: list[int] = []
@@ -192,6 +198,7 @@ def main() -> None:
     parser.add_argument("--progress-every", type=int, default=50)
     parser.add_argument("--preserve-tool-argument-mappings", action="store_true")
     parser.add_argument("--sequence-lengths-only", action="store_true")
+    parser.add_argument("--limit", type=int)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     result = analyze(
@@ -200,6 +207,7 @@ def main() -> None:
         progress_every=args.progress_every,
         preserve_tool_argument_mappings=args.preserve_tool_argument_mappings,
         sequence_lengths_only=args.sequence_lengths_only,
+        limit=args.limit,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
 
