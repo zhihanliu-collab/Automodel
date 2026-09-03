@@ -62,4 +62,4 @@ def test_odoo_cache_config_builds_plain_filtered_dataset(tmp_path):
     assert sample["input_ids"].tolist() == [1, 2, 3, 4]
     assert sample["labels"].tolist() == [2, 3, 4, -100]
     assert sample["attention_mask"].tolist() == [1, 1, 1, 1]
-    assert sample["source_id"].item() == 0
+    assert sample["source_id"].tolist() == [0]

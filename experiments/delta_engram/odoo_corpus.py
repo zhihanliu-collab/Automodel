@@ -425,7 +425,9 @@ class OdooCorpusDataset(Dataset):
             "input_ids": input_ids,
             "labels": labels,
             "attention_mask": torch.ones_like(input_ids),
-            "source_id": torch.tensor(SOURCE_TO_ID[record["source"]], dtype=torch.long),
+            # ``default_collater`` concatenates tensor-valued fields along dim 0,
+            # so metadata must keep an explicit per-example batch dimension.
+            "source_id": torch.tensor([SOURCE_TO_ID[record["source"]]], dtype=torch.long),
         }
 
 
