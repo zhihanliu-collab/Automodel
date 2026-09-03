@@ -434,10 +434,23 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         ngram_vocab_size_base: Optional[int] = None,
         disable_hash_fusion: bool = False,
+        exact_hot_keys_path: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.ngram_embed_dim = int(embedding_dim)
+        # Exact-hot masking (Delta only): sorted packed n-gram keys seen in
+        # training; a head whose n-gram is absent reads zero. Loaded on CPU,
+        # moved to the lookup device on first use (before CUDA graph capture).
+        self.exact_hot_keys = None
+        self._exact_hot_mask = None
+        if exact_hot_keys_path:
+            keys = torch.load(exact_hot_keys_path, map_location="cpu")
+            self.exact_hot_keys = {
+                "bigram": keys["bigram"].to(torch.long).contiguous(),
+                "trigram": keys["trigram"].to(torch.long).contiguous(),
+                "pack_base": int(keys["pack_base"]),
+            }
         self.ngram_size = int(config.ngram_size)
         self.heads_per_ngram = int(config.heads_per_ngram)
         self.ngram_heads = (self.ngram_size - 1) * self.heads_per_ngram
@@ -647,6 +660,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             if cached is not None and cached[1] is contexts:
                 pool.ple_window_cache = (cached[0], contexts, shifted_tokens)
 
+        if self.exact_hot_keys is not None:
+            self._exact_hot_mask = self._exact_hot_head_mask(shifted_tokens)
+
         blocks = []
         for ngram in range(2, self.ngram_size + 1):
             ngram_idx = ngram - 2
@@ -665,6 +681,36 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             ngram_ids = ngram_ids + head_offsets.view(1, 1, -1)
             blocks.append(ngram_ids[:, 0])
         return torch.cat(blocks, dim=-1)
+
+    def _exact_hot_head_mask(self, shifted_tokens) -> torch.Tensor:
+        """[tokens, heads] mask: 1 where this head's n-gram occurred in training."""
+        device = shifted_tokens[0].device
+        for k in ("bigram", "trigram"):
+            if self.exact_hot_keys[k].device != device:
+                self.exact_hot_keys[k] = self.exact_hot_keys[k].to(device)
+        base = self.exact_hot_keys["pack_base"]
+        cur = shifted_tokens[0][:, -1].to(torch.long)
+        prev1 = shifted_tokens[1][:, -1].to(torch.long)
+        found = [self._exact_hot_member(self.exact_hot_keys["bigram"], prev1 * base + cur)]
+        if self.ngram_size >= 3:
+            prev2 = shifted_tokens[2][:, -1].to(torch.long)
+            found.append(
+                self._exact_hot_member(
+                    self.exact_hot_keys["trigram"], (prev2 * base + prev1) * base + cur
+                )
+            )
+        if len(found) != self.ngram_size - 1:
+            raise NotImplementedError("exact-hot masking supports ngram_size <= 3")
+        mask = torch.cat(
+            [f.unsqueeze(-1).expand(-1, self.heads_per_ngram) for f in found], dim=-1
+        )
+        return mask.to(torch.bfloat16)
+
+    @staticmethod
+    def _exact_hot_member(sorted_keys: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
+        idx = torch.searchsorted(sorted_keys, key)
+        idx_c = idx.clamp_max(sorted_keys.numel() - 1)
+        return (idx < sorted_keys.numel()) & (sorted_keys[idx_c] == key)
 
     def _shift_right_ignore_eos(self, tensor: torch.Tensor, n: int) -> torch.Tensor:
         if n == 0:
@@ -702,6 +748,14 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         embeddings = self._embed_ngram_ids(
             ngram_ids, forward_batch, batch.physical_tokens
         )
+        if self._exact_hot_mask is not None:
+            mask = self._exact_hot_mask
+            self._exact_hot_mask = None
+            if mask.shape[0] != embeddings.shape[0]:
+                raise RuntimeError(
+                    f"exact-hot mask rows {mask.shape[0]} != embedding rows {embeddings.shape[0]}"
+                )
+            embeddings = embeddings * mask.to(embeddings.dtype).unsqueeze(-1)
         return embeddings.flatten(start_dim=-2)
 
     def compute_ngram_ids(self, batch: _PLEBatch) -> torch.Tensor:
@@ -892,6 +946,7 @@ class Qwen4ExpPLELayer(nn.Module):
         disable_hash_fusion: bool = False,
         conv_state_layer_id: Optional[int] = None,
         offload_embedding: Optional[bool] = None,
+        exact_hot_keys_path: Optional[str] = None,
     ) -> None:
         super().__init__()
         # The base table (320M rows) is offloaded to pinned host memory when the
@@ -918,6 +973,7 @@ class Qwen4ExpPLELayer(nn.Module):
             quant_config=quant_config,
             ngram_vocab_size_base=ngram_vocab_size_base,
             disable_hash_fusion=disable_hash_fusion,
+            exact_hot_keys_path=exact_hot_keys_path,
         )
         if offload:
             self.ple_embedding.ngram_embedding = Qwen4ExpPinnedHostEmbedding(
@@ -1294,7 +1350,9 @@ class Qwen4ExpLayerExtensionMixin:
                     disable_hash_fusion=True,
                     conv_state_layer_id=config.delta_short_conv_layer_id(layer_id),
                     offload_embedding=False,
+                    exact_hot_keys_path=getattr(config, "delta_exact_hot_keys_path", None),
                 )
+                self.delta_output_scale = float(getattr(config, "delta_output_scale", 1.0))
 
         hc_config = HyperConnectionConfig(
             hc_count=self.hc_count,
@@ -1347,9 +1405,10 @@ class Qwen4ExpLayerExtensionMixin:
                 if self.delta_ple is not None:
                     # Same pre-injection state for both branches (training:
                     # hidden += base_ple(x, ids); hidden += delta_ple(x, ids)).
-                    ple_out = ple_out + self.delta_ple(
-                        ple_query, forward_batch, ple_batch
-                    )
+                    delta_out = self.delta_ple(ple_query, forward_batch, ple_batch)
+                    if self.delta_output_scale != 1.0:
+                        delta_out = delta_out * self.delta_output_scale
+                    ple_out = ple_out + delta_out
                 hidden_states = hidden_states + ple_out
 
         hidden_states, residual = self.attn_hyper_connection.mix(hidden_states)

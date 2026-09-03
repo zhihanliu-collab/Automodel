@@ -32,6 +32,8 @@ class Qwen4ExpTextConfig(Qwen3NextConfig):
         ple_embedding_dtype=None,
         delta_engram_enabled=False,
         delta_ngram_vocab_size_per_head=1000000,
+        delta_exact_hot_keys_path=None,
+        delta_output_scale=1.0,
         index_share_for_mtp_iteration=True,
         rope_parameters=None,
         layer_types=None,
@@ -81,6 +83,12 @@ class Qwen4ExpTextConfig(Qwen3NextConfig):
         # checkpoint carries its hash layout as buffers, exactly like the base.
         self.delta_engram_enabled = bool(delta_engram_enabled)
         self.delta_ngram_vocab_size_per_head = int(delta_ngram_vocab_size_per_head)
+        # Serving-side experiments on a trained Delta (see serving/README.md):
+        # exact-hot = only n-grams that occurred in the TRAIN split may read the
+        # Delta table (novel n-grams get zero instead of a hash collision);
+        # output_scale = multiply the Delta branch output before it is added.
+        self.delta_exact_hot_keys_path = delta_exact_hot_keys_path
+        self.delta_output_scale = float(delta_output_scale)
         # MTP draft decode steps reuse the draft-extend indexer selection
         # (GLM-5.2 IndexShare); default on for Qwen4-Exp, checkpoint config
         # or --json-model-override-args can disable it.
