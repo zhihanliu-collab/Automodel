@@ -64,18 +64,13 @@ loss_fn:
   _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
 
 dataset:
-  _target_: nemo_automodel.components.datasets.llm.chat_dataset.ChatDataset
-  path_or_dataset_id: allenai/tulu-3-sft-mixture
-  split: "train[:32]"
-  shuffle_seed: 42
-  truncation: true
-  seq_length: 512
-  padding: do_not_pad
-  mask_history: true
-  tokenizer:
-    _target_: transformers.AutoTokenizer.from_pretrained
-    pretrained_model_name_or_path: Qwen/Qwen3.8-Flash-Next
-    trust_remote_code: false
+  # The custom probe loop does not consume training batches, but recipe setup
+  # still materializes its loaders. Use the local pretokenized cache so a
+  # restore-only probe never downloads the unrelated Tulu corpus.
+  _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v1
+  split: train
+  sources: [memory_edits]
 
 packed_sequence:
   packed_sequence_size: 0
@@ -89,18 +84,10 @@ dataloader:
   num_workers: 0
 
 validation_dataset:
-  _target_: nemo_automodel.components.datasets.llm.chat_dataset.ChatDataset
-  path_or_dataset_id: allenai/tulu-3-sft-mixture
-  split: "train[256:288]"
-  shuffle_seed: 42
-  truncation: true
-  seq_length: 512
-  padding: do_not_pad
-  mask_history: true
-  tokenizer:
-    _target_: transformers.AutoTokenizer.from_pretrained
-    pretrained_model_name_or_path: Qwen/Qwen3.8-Flash-Next
-    trust_remote_code: false
+  _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v1
+  split: validation
+  sources: [memory_edits]
 
 validation_dataloader:
   _target_: torchdata.stateful_dataloader.StatefulDataLoader
