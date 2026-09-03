@@ -31,6 +31,7 @@ LR_DECAY_STEPS="${15:-$MAX_STEPS}"
 CONFIG_PATH="${16:-examples/llm_finetune/qwen/qwen3_8_flash_next_180b_hellaswag_ep64.yaml}"
 GLOBAL_BATCH_SIZE="${17:-}"
 CKPT_EVERY_STEPS="${18:-$MAX_STEPS}"
+SEED_OVERRIDE="${19:-}"
 CODE_ROOT=/home/zhihan/delta-engram-automodel
 DATA_ROOT=/mnt/data/zhihan/delta-engram
 DEFAULT_ACCESS_COUNTS="$DATA_ROOT/corpus/qwen38-131k-v1/delta_access_counts.u32"
@@ -57,7 +58,7 @@ else
   echo "wandb credential: missing"
 fi
 
-echo "[$(date -u +%FT%TZ)] delta start job=$SLURM_JOB_ID nodes=$SLURM_JOB_NODELIST rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT ep_size=$EP_SIZE cp_size=$CP_SIZE global_batch_size=${GLOBAL_BATCH_SIZE:-auto} reader_lr=$READER_LR table_lr_mult=$TABLE_LR_MULT lr_warmup_steps=$LR_WARMUP_STEPS min_lr=$MIN_LR val_every_steps=$VAL_EVERY_STEPS ckpt_every_steps=$CKPT_EVERY_STEPS lr_decay_steps=$LR_DECAY_STEPS config_path=$CONFIG_PATH access_counts=${DELTA_ACCESS_COUNTS_PATH:-disabled}"
+echo "[$(date -u +%FT%TZ)] delta start job=$SLURM_JOB_ID nodes=$SLURM_JOB_NODELIST rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT ep_size=$EP_SIZE cp_size=$CP_SIZE global_batch_size=${GLOBAL_BATCH_SIZE:-auto} reader_lr=$READER_LR table_lr_mult=$TABLE_LR_MULT lr_warmup_steps=$LR_WARMUP_STEPS min_lr=$MIN_LR val_every_steps=$VAL_EVERY_STEPS ckpt_every_steps=$CKPT_EVERY_STEPS lr_decay_steps=$LR_DECAY_STEPS config_path=$CONFIG_PATH seed_override=${SEED_OVERRIDE:-config} access_counts=${DELTA_ACCESS_COUNTS_PATH:-disabled}"
 git -C "$CODE_ROOT" status --short --branch
 export EXPECTED_CODE_COMMIT
 EXPECTED_CODE_COMMIT=$(git -C "$CODE_ROOT" rev-parse HEAD)
@@ -85,7 +86,8 @@ for NODE_RANK in "${!NODES[@]}"; do
       "$MAX_STEPS" "$CHECKPOINT_ENABLED" "$NODE_RANK" "$MASTER_ADDR" "$MASTER_PORT" "$SLURM_NNODES" \
       "$DELTA_ROWS_PER_HEAD" "$CHECKPOINT_TAG" "$RESTORE_FROM" "$NUM_EPOCHS" "$DATASET_LIMIT" \
       "$EP_SIZE" "$CP_SIZE" "$READER_LR" "$TABLE_LR_MULT" "$LR_WARMUP_STEPS" "$MIN_LR" \
-      "$VAL_EVERY_STEPS" "$LR_DECAY_STEPS" "$CONFIG_PATH" "$GLOBAL_BATCH_SIZE" "$CKPT_EVERY_STEPS" &
+      "$VAL_EVERY_STEPS" "$LR_DECAY_STEPS" "$CONFIG_PATH" "$GLOBAL_BATCH_SIZE" "$CKPT_EVERY_STEPS" \
+      "$SEED_OVERRIDE" &
   STEP_PIDS+=("$!")
 done
 

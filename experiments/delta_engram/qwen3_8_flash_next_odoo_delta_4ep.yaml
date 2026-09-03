@@ -10,7 +10,8 @@ step_scheduler:
   # 32 GPUs = DP4 x CP8. One sample spans each 8-rank CP group.
   global_batch_size: 4
   local_batch_size: 1
-  ckpt_every_steps: 330
+  # Half-epoch checkpoints retain every epoch boundary and cap recovery loss.
+  ckpt_every_steps: 165
   save_checkpoint_every_epoch: false
   val_every_steps: 165
   gc_every_steps: 10
@@ -80,7 +81,11 @@ dataloader:
   _target_: torchdata.stateful_dataloader.StatefulDataLoader
   collate_fn:
     _target_: nemo_automodel.components.datasets.utils.default_collater
-    pad_seq_len_divisible: 64
+    # Flex QSA is compiled per static sequence shape.  Bucketing at 1024
+    # bounds a 131K run to at most 128 variants, below PyTorch's default
+    # accumulated recompile limit (256); falling through that limit executes
+    # unfused dense math attention and OOMs even on ordinary ~66K examples.
+    pad_seq_len_divisible: 1024
   shuffle: true
   group_by_length: true
   num_workers: 2
@@ -109,7 +114,9 @@ validation_dataloader:
   _target_: torchdata.stateful_dataloader.StatefulDataLoader
   collate_fn:
     _target_: nemo_automodel.components.datasets.utils.default_collater
-    pad_seq_len_divisible: 64
+    # Share the same bounded shape vocabulary with training so validation
+    # cannot consume a second set of FlexAttention compile variants.
+    pad_seq_len_divisible: 1024
   shuffle: false
   group_by_length: true
   drop_last: true
