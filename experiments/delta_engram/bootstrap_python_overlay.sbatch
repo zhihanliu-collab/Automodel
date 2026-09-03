@@ -4,7 +4,6 @@
 #SBATCH --nodes=1
 #SBATCH --nodelist=b200-2
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=00:20:00
@@ -17,7 +16,7 @@ set -eo pipefail
 OVERLAY=/mnt/data/zhihan/delta-engram/python-overlay
 mkdir -p "$OVERLAY"
 
-srun --nodes=1 --ntasks=1 --gpus-per-node=1 --cpus-per-task=4 --mem=16G \
+srun --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=16G \
   --container-name=miles-q38next-standing \
   --container-mounts=/mnt/data:/mnt/data \
   --container-workdir=/tmp \
@@ -56,11 +55,4 @@ srun --nodes=1 --ntasks=1 --gpus-per-node=1 --cpus-per-task=4 --mem=16G \
     PYTHONPATH=/mnt/data/zhihan/delta-engram/python-overlay \
       python -c "from fla.modules.convolution import causal_conv1d; from fla.ops.cp import build_cp_context; from fla.ops.gated_delta_rule import chunk_gated_delta_rule; print(\"FLA CP imports OK\")"
 
-    MAX_JOBS=4 TORCH_CUDA_ARCH_LIST=10.0 \
-      python -m pip install --no-deps --no-build-isolation --upgrade \
-        --target=/mnt/data/zhihan/delta-engram/python-overlay \
-        causal-conv1d==1.6.0
-
-    PYTHONPATH=/mnt/data/zhihan/delta-engram/python-overlay \
-      python -c "import torch; import causal_conv1d_cuda; from fla.modules.convolution import causal_conv1d; print(\"causal-conv1d CUDA fast path OK\")"
   '

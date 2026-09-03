@@ -44,8 +44,6 @@ export CUDA_CACHE_PATH="$LOCAL_CACHE_ROOT/cuda"
 
 mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH"
 
-python -c 'import torch; import causal_conv1d_cuda; from fla.modules.convolution import causal_conv1d'
-
 if (( WORLD_SIZE % EP_SIZE != 0 || WORLD_SIZE % CP_SIZE != 0 )); then
   echo "EP_SIZE=$EP_SIZE and CP_SIZE=$CP_SIZE must each divide WORLD_SIZE=$WORLD_SIZE" >&2
   exit 2
