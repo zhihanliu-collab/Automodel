@@ -1,5 +1,5 @@
 --- upstream_configs_qwen4_exp.py	2026-09-03 11:54:56.411093695 -0700
-+++ configs_qwen4_exp.py	2026-09-03 11:55:06.332087010 -0700
++++ configs_qwen4_exp.py	2026-09-03 12:03:13.579871460 -0700
 @@ -30,6 +30,8 @@
          make_ngram_vocab_size_divisible_by=128,
          ple_offload_embedding=False,
@@ -63,7 +63,7 @@
      def short_conv_state_shape(self):
          if not self.short_conv_layer_ids:
 --- upstream_models_qwen4_exp.py	2026-09-03 11:54:56.402092794 -0700
-+++ models_qwen4_exp.py	2026-09-03 11:55:06.340087811 -0700
++++ models_qwen4_exp.py	2026-09-03 12:03:13.590872561 -0700
 @@ -432,6 +432,8 @@
          embedding_dim: int,
          ple_layer_index: int = 0,
@@ -100,16 +100,25 @@
  
          self.register_buffer(
              "layer_multipliers",
-@@ -877,9 +888,15 @@
+@@ -877,9 +888,24 @@
          prefix: str = "",
          layer_id: Optional[int] = None,
          ple_layer_index: int = 0,
 +        ngram_vocab_size_base: Optional[int] = None,
 +        disable_hash_fusion: bool = False,
 +        conv_state_layer_id: Optional[int] = None,
++        offload_embedding: Optional[bool] = None,
      ) -> None:
          super().__init__()
 -        self.layer_id = layer_id
++        # The base table (320M rows) is offloaded to pinned host memory when the
++        # server asks for it; the Delta table (16M rows, ~1.3 GB per TP rank)
++        # stays GPU-resident regardless (offload_embedding=False).
++        offload = (
++            bool(config.ple_offload_embedding)
++            if offload_embedding is None
++            else bool(offload_embedding)
++        )
 +        # `layer_id` is only used to address this branch's short-conv state in
 +        # the pool; a Delta PLE passes its own slot (see
 +        # Qwen4ExpTextConfig.delta_short_conv_layer_id).
@@ -117,16 +126,30 @@
          self.hidden_size = config.hidden_size
          self.ple_embed_dim = config.ple_embed_dim
          self.conv_kernel_size = config.ple_conv_kernel_size
-@@ -890,6 +907,8 @@
+@@ -890,8 +916,10 @@
              self.ple_embed_dim,
              ple_layer_index=ple_layer_index,
              quant_config=quant_config,
 +            ngram_vocab_size_base=ngram_vocab_size_base,
 +            disable_hash_fusion=disable_hash_fusion,
          )
-         if config.ple_offload_embedding:
+-        if config.ple_offload_embedding:
++        if offload:
              self.ple_embedding.ngram_embedding = Qwen4ExpPinnedHostEmbedding(
-@@ -1229,6 +1248,7 @@
+                 self.ple_embedding.ngram_embedding
+             )
+@@ -941,9 +969,7 @@
+             bias=False,
+         )
+         nn.init.zeros_(self.conv1d.weight)
+-        self._prefetch_stream = (
+-            torch.cuda.Stream() if config.ple_offload_embedding else None
+-        )
++        self._prefetch_stream = torch.cuda.Stream() if offload else None
+         self._graph_prefetch_buffers = {}
+         self._eager_prefetch_buffer = None
+         self._prefetch_state = None
+@@ -1229,6 +1255,7 @@
          self.hc_count = config.hc_count
          self.hidden_size = config.hidden_size
          self.ple = None
@@ -134,7 +157,7 @@
  
          for attr_name in (
              "input_layernorm",
-@@ -1253,6 +1273,24 @@
+@@ -1253,6 +1280,21 @@
                  layer_id=layer_id,
                  ple_layer_index=ple_layer_index,
              )
@@ -142,10 +165,6 @@
 +                # Delta-Engram: a second, independently hashed n-gram table with
 +                # its own reader (key/value proj, norms, short conv), read from
 +                # the same pre-injection state as the base PLE and added to it.
-+                if config.ple_offload_embedding:
-+                    raise NotImplementedError(
-+                        "Delta-Engram PLE does not support ple_offload_embedding"
-+                    )
 +                self.delta_ple = Qwen4ExpPLELayer(
 +                    config,
 +                    quant_config=quant_config,
@@ -155,11 +174,12 @@
 +                    ngram_vocab_size_base=int(config.delta_ngram_vocab_size_per_head),
 +                    disable_hash_fusion=True,
 +                    conv_state_layer_id=config.delta_short_conv_layer_id(layer_id),
++                    offload_embedding=False,
 +                )
  
          hc_config = HyperConnectionConfig(
              hc_count=self.hc_count,
-@@ -1295,13 +1333,20 @@
+@@ -1295,13 +1337,20 @@
                          "non-idle Qwen4 PLE forward is missing its batch"
                      )
                  self.ple.forward_idle(forward_batch)
@@ -183,7 +203,7 @@
  
          hidden_states, residual = self.attn_hyper_connection.mix(hidden_states)
          return hidden_states, residual
-@@ -1750,7 +1795,8 @@
+@@ -1750,7 +1799,8 @@
          buffers: dict,
          loaded_buffers: Set[str],
      ) -> bool:
@@ -193,7 +213,7 @@
              return False
          buffer_name = name.rsplit(".", 1)[-1]
          if buffer_name.startswith("hashstats_"):
-@@ -1772,6 +1818,17 @@
+@@ -1772,6 +1822,17 @@
                  f"Shape mismatch for {name}: expected {tuple(buffer.shape)}, "
                  f"got {tuple(loaded_weight.shape)}"
              )
@@ -211,7 +231,7 @@
          buffer.copy_(loaded_weight.to(device=buffer.device, dtype=buffer.dtype))
          loaded_buffers.add(name)
          return True
-@@ -1969,9 +2026,10 @@
+@@ -1969,9 +2030,10 @@
                  continue
              if load_qwen4_exp_ple_shard(name, loaded_weight):
                  continue

@@ -891,8 +891,17 @@ class Qwen4ExpPLELayer(nn.Module):
         ngram_vocab_size_base: Optional[int] = None,
         disable_hash_fusion: bool = False,
         conv_state_layer_id: Optional[int] = None,
+        offload_embedding: Optional[bool] = None,
     ) -> None:
         super().__init__()
+        # The base table (320M rows) is offloaded to pinned host memory when the
+        # server asks for it; the Delta table (16M rows, ~1.3 GB per TP rank)
+        # stays GPU-resident regardless (offload_embedding=False).
+        offload = (
+            bool(config.ple_offload_embedding)
+            if offload_embedding is None
+            else bool(offload_embedding)
+        )
         # `layer_id` is only used to address this branch's short-conv state in
         # the pool; a Delta PLE passes its own slot (see
         # Qwen4ExpTextConfig.delta_short_conv_layer_id).
@@ -910,7 +919,7 @@ class Qwen4ExpPLELayer(nn.Module):
             ngram_vocab_size_base=ngram_vocab_size_base,
             disable_hash_fusion=disable_hash_fusion,
         )
-        if config.ple_offload_embedding:
+        if offload:
             self.ple_embedding.ngram_embedding = Qwen4ExpPinnedHostEmbedding(
                 self.ple_embedding.ngram_embedding
             )
@@ -960,9 +969,7 @@ class Qwen4ExpPLELayer(nn.Module):
             bias=False,
         )
         nn.init.zeros_(self.conv1d.weight)
-        self._prefetch_stream = (
-            torch.cuda.Stream() if config.ple_offload_embedding else None
-        )
+        self._prefetch_stream = torch.cuda.Stream() if offload else None
         self._graph_prefetch_buffers = {}
         self._eager_prefetch_buffer = None
         self._prefetch_state = None
@@ -1277,10 +1284,6 @@ class Qwen4ExpLayerExtensionMixin:
                 # Delta-Engram: a second, independently hashed n-gram table with
                 # its own reader (key/value proj, norms, short conv), read from
                 # the same pre-injection state as the base PLE and added to it.
-                if config.ple_offload_embedding:
-                    raise NotImplementedError(
-                        "Delta-Engram PLE does not support ple_offload_embedding"
-                    )
                 self.delta_ple = Qwen4ExpPLELayer(
                     config,
                     quant_config=quant_config,
@@ -1290,6 +1293,7 @@ class Qwen4ExpLayerExtensionMixin:
                     ngram_vocab_size_base=int(config.delta_ngram_vocab_size_per_head),
                     disable_hash_fusion=True,
                     conv_state_layer_id=config.delta_short_conv_layer_id(layer_id),
+                    offload_embedding=False,
                 )
 
         hc_config = HyperConnectionConfig(
