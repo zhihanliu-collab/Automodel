@@ -406,6 +406,45 @@ def test_chat_dataset_rejects_invalid_tools_field(monkeypatch):
         _ = ds_bad_json[0]
 
 
+def test_chat_dataset_can_preserve_mapping_tool_arguments(monkeypatch):
+    class Tok:
+        eos_token_id = 1
+        chat_template = "{{ default }}"
+
+    messages = [
+        {"role": "user", "content": "q"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "search", "arguments": {"query": "odoo"}},
+                }
+            ],
+        },
+    ]
+    captured = {}
+    monkeypatch.setattr(tcd, "_has_chat_template", lambda _tok: True)
+    monkeypatch.setattr(tcd, "_add_pad_token", lambda _tok: 0)
+    monkeypatch.setattr(tcd, "_load_openai_messages", lambda *a, **k: [{"messages": messages}])
+
+    def fake_format(_tokenizer, normalized, *_args, **_kwargs):
+        captured["arguments"] = normalized[1]["tool_calls"][0]["function"]["arguments"]
+        return {"input_ids": [1], "labels": [1], "attention_mask": [1]}
+
+    monkeypatch.setattr(tcd, "format_chat_template", fake_format)
+
+    default_ds = tcd.ChatDataset("ignored", Tok())
+    _ = default_ds[0]
+    assert captured["arguments"] == '{"query": "odoo"}'
+
+    mapping_ds = tcd.ChatDataset("ignored", Tok(), preserve_tool_argument_mappings=True)
+    _ = mapping_ds[0]
+    assert captured["arguments"] == {"query": "odoo"}
+
+
 def test_chat_dataset_skip_invalid_samples_does_not_filter_structured_bad_rows(monkeypatch):
     """skip_invalid_samples only affects JSONL parse errors, not invalid message rows after load."""
 

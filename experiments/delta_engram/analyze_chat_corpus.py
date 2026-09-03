@@ -90,7 +90,8 @@ def analyze(
     if not tokenizer.chat_template:
         raise RuntimeError(f"{model_id} tokenizer has no chat template")
 
-    if preserve_tool_argument_mappings:
+    raw_sequence_render = preserve_tool_argument_mappings and sequence_lengths_only
+    if raw_sequence_render:
         rows = [json.loads(line) for line in dataset_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         dataset_length = len(rows)
     else:
@@ -103,13 +104,14 @@ def analyze(
             padding="do_not_pad",
             mask_history=False,
             mask_reasoning_content=False,
+            preserve_tool_argument_mappings=preserve_tool_argument_mappings,
         )
         dataset_length = len(dataset)
     sequence_lengths: list[int] = []
     supervised_lengths: list[int] = []
     supervised_runs: list[int] = []
     for index in range(dataset_length):
-        if preserve_tool_argument_mappings:
+        if raw_sequence_render:
             row = rows[index]
             sample = tokenizer.apply_chat_template(
                 row["messages"],

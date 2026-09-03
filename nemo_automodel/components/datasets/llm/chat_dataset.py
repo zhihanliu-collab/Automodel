@@ -351,6 +351,8 @@ class ChatDatasetConfig:
     """Passed through to ``format_chat_template``."""
     skip_invalid_samples: bool = False
     """If ``True``, skip malformed JSONL lines when reading local files."""
+    preserve_tool_argument_mappings: bool = False
+    """Keep mapping-valued tool-call arguments instead of JSON-encoding them."""
 
     def build(self, *, tokenizer: "PreTrainedTokenizerBase | None") -> "ChatDataset":
         """Build a :class:`ChatDataset` from this :class:`ChatDatasetConfig` and a runtime tokenizer."""
@@ -369,6 +371,7 @@ class ChatDatasetConfig:
             mask_history=self.mask_history,
             unshifted=self.unshifted,
             skip_invalid_samples=self.skip_invalid_samples,
+            preserve_tool_argument_mappings=self.preserve_tool_argument_mappings,
         )
 
 
@@ -400,6 +403,7 @@ class ChatDataset(Dataset):
         mask_history: bool = False,
         unshifted: bool = False,
         skip_invalid_samples: bool = False,
+        preserve_tool_argument_mappings: bool = False,
     ) -> None:
         """Load OpenAI-format chat rows and tokenize via the chat template.
 
@@ -425,6 +429,11 @@ class ChatDataset(Dataset):
             skip_invalid_samples: If ``True``, skip malformed JSONL lines when reading local files (warning logs
                 include skip counts). If ``False``, a bad line raises. Does not skip invalid structured rows after
                 load; those still raise when a sample is accessed.
+            preserve_tool_argument_mappings: Keep dict-valued
+                ``tool_calls[].function.arguments`` as mappings. Enable for
+                templates such as Qwen3.8-Flash-Next that iterate over
+                ``arguments|items``. The default serializes mappings to JSON
+                strings for OpenAI-wire-compatible templates.
         """
         if tokenizer is None:
             raise ValueError("Tokenizer is required")
@@ -445,6 +454,7 @@ class ChatDataset(Dataset):
         self.mask_history = mask_history
         self.unshifted = unshifted
         self.skip_invalid_samples = skip_invalid_samples
+        self.preserve_tool_argument_mappings = preserve_tool_argument_mappings
 
         self.dataset = _load_openai_messages(
             path_or_dataset_id,
@@ -497,6 +507,21 @@ class ChatDataset(Dataset):
             )
 
         normalized = _normalize_messages(messages)
+        if getattr(self, "preserve_tool_argument_mappings", False):
+            # ``_normalize_messages`` emits OpenAI wire-format argument
+            # strings. Restore only source mappings while retaining all of its
+            # validation and default-field behavior.
+            for original, rendered in zip(messages, normalized, strict=True):
+                if original.get("role") != "assistant":
+                    continue
+                original_calls = original.get("tool_calls")
+                rendered_calls = rendered.get("tool_calls")
+                if not isinstance(original_calls, list) or not isinstance(rendered_calls, list):
+                    continue
+                for original_call, rendered_call in zip(original_calls, rendered_calls, strict=True):
+                    arguments = original_call.get("function", {}).get("arguments")
+                    if isinstance(arguments, dict):
+                        rendered_call["function"]["arguments"] = dict(arguments)
         tools = row.get("tools")
         if isinstance(tools, str):
             # JSONL-stored datasets often serialize the `tools` field as a JSON
