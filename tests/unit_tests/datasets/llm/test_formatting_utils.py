@@ -68,6 +68,18 @@ def test_multiturn_mask_unpadded_full_ids_matches_recompute():
     assert baseline == [0, 0, 1, 1, 0, 0, 1, 1]
 
 
+def test_multiturn_mask_honors_per_assistant_step_loss_mask():
+    formatted = _conversation()
+    formatted[1]["step_loss_mask"] = 0
+    input_ids = list(range(2 * len(formatted)))
+
+    mask = formatting_utils._build_multiturn_assistant_mask(
+        _CountingTokenizer(), formatted, input_ids, unpadded_full_ids=list(input_ids)
+    )
+
+    assert mask == [0, 0, 0, 0, 0, 0, 1, 1]
+
+
 def test_multiturn_mask_unpadded_full_ids_skips_full_retokenize():
     # When the dialogue ends on an assistant turn, the closing boundary is the
     # full conversation and must be served from unpadded_full_ids, not a fresh call.

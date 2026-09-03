@@ -213,6 +213,8 @@ def _build_multiturn_assistant_mask(
             continue
 
         found_assistant = True
+        if message.get("step_loss_mask", 1) in (0, False):
+            continue
         start = prefix_length(idx)
         end = prefix_length(idx + 1)
         for pos in range(min(start, len(assistant_mask)), min(end, len(assistant_mask))):
