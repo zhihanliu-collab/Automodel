@@ -376,6 +376,28 @@ class Qwen3_8_FlashNextConfig(PretrainedConfig):
             **kwargs,
         )
 
+    @property
+    def delta_engram_enabled(self) -> bool:
+        """Expose the nested Delta switch for Hugging Face config overrides."""
+        return bool(self.text_config.delta_engram_enabled)
+
+    @delta_engram_enabled.setter
+    def delta_engram_enabled(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError(f"delta_engram_enabled must be a bool, got {type(value).__name__}")
+        self.text_config.delta_engram_enabled = value
+
+    @property
+    def delta_ngram_vocab_size_per_head(self) -> int:
+        """Expose the nested Delta capacity for Hugging Face config overrides."""
+        return int(self.text_config.delta_ngram_vocab_size_per_head)
+
+    @delta_ngram_vocab_size_per_head.setter
+    def delta_ngram_vocab_size_per_head(self, value: int) -> None:
+        if value <= 0:
+            raise ValueError(f"delta_ngram_vocab_size_per_head must be positive, got {value}")
+        self.text_config.delta_ngram_vocab_size_per_head = int(value)
+
 
 class Qwen3_8_FlashNextLegacyTextConfig(Qwen3_8_FlashNextTextConfig):
     """Text config alias for checkpoint dumps that predate the model rename."""

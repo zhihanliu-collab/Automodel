@@ -298,6 +298,16 @@ def test_delta_engram_configuration_round_trips_in_text_config() -> None:
     assert payload["delta_ngram_vocab_size_per_head"] == 12345
 
 
+def test_top_level_delta_overrides_update_the_nested_text_config() -> None:
+    config = Qwen3_8_FlashNextConfig(text_config=Qwen3_8_FlashNextTextConfig())
+
+    config.delta_engram_enabled = True
+    config.delta_ngram_vocab_size_per_head = 54321
+
+    assert config.text_config.delta_engram_enabled is True
+    assert config.text_config.delta_ngram_vocab_size_per_head == 54321
+
+
 def test_invalid_delta_engram_capacity_is_rejected() -> None:
     with pytest.raises(ValueError, match="delta_ngram_vocab_size_per_head must be positive"):
         Qwen3_8_FlashNextTextConfig(delta_ngram_vocab_size_per_head=0)
