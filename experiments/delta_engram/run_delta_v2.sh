@@ -36,6 +36,7 @@ fi
 
 OVERRIDES=()
 [[ -n "${MAX_STEPS:-}" ]] && OVERRIDES+=(--step_scheduler.max_steps "$MAX_STEPS" --lr_scheduler.lr_decay_steps "$MAX_STEPS")
+[[ -n "${LR_WARMUP_STEPS:-}" ]] && OVERRIDES+=(--lr_scheduler.lr_warmup_steps "$LR_WARMUP_STEPS")
 [[ -n "${NUM_EPOCHS:-}" ]] && OVERRIDES+=(--step_scheduler.num_epochs "$NUM_EPOCHS")
 [[ -n "${VAL_EVERY_STEPS:-}" ]] && OVERRIDES+=(--step_scheduler.val_every_steps "$VAL_EVERY_STEPS")
 [[ -n "${CKPT_EVERY_STEPS:-}" ]] && OVERRIDES+=(--step_scheduler.ckpt_every_steps "$CKPT_EVERY_STEPS")

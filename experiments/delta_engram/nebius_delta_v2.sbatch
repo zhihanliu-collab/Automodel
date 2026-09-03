@@ -16,7 +16,7 @@
 #   CHECKPOINT_TAG    checkpoint dir name under /mnt/data/zhihan/delta-engram/checkpoints (required)
 #   MAX_STEPS         override step_scheduler.max_steps (default: yaml)
 #   NUM_EPOCHS        override step_scheduler.num_epochs (default: yaml)
-#   VAL_EVERY_STEPS / CKPT_EVERY_STEPS  overrides (default: yaml)
+#   VAL_EVERY_STEPS / CKPT_EVERY_STEPS / LR_WARMUP_STEPS  overrides (default: yaml; a short smoke needs warmup < max_steps)
 #   DELTA_ALPHA       override model.config.delta_alpha (default: yaml)
 #   KEYS_PATH         override model.config.delta_exact_keys_path (default: yaml)
 #   RESTORE_FROM      checkpoint path to resume from (default: fresh)
@@ -30,7 +30,7 @@ CODE_ROOT=/home/zhihan/delta-engram-automodel
 DATA_ROOT=/mnt/data/zhihan/delta-engram
 : "${CHECKPOINT_TAG:?set CHECKPOINT_TAG}"
 export CONFIG_PATH="${CONFIG_PATH:-experiments/delta_engram/qwen3_8_flash_next_odoo_delta_v2.yaml}"
-export CHECKPOINT_TAG MAX_STEPS NUM_EPOCHS VAL_EVERY_STEPS CKPT_EVERY_STEPS DELTA_ALPHA KEYS_PATH RESTORE_FROM
+export CHECKPOINT_TAG MAX_STEPS NUM_EPOCHS VAL_EVERY_STEPS CKPT_EVERY_STEPS LR_WARMUP_STEPS DELTA_ALPHA KEYS_PATH RESTORE_FROM
 export DELTA_GATE_TOLERANCE="${DELTA_GATE_TOLERANCE:-0.0}"
 export DELTA_GATE_VAL_NAME="${DELTA_GATE_VAL_NAME:-offline_docs}"
 mkdir -p "$DATA_ROOT/logs" "$DATA_ROOT/checkpoints"
