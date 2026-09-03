@@ -158,7 +158,10 @@ class DeltaGenerationProbeRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         encoded = self.tokenizer(rendered, add_special_tokens=False, return_tensors="pt")
         return encoded["input_ids"].to(self.dist_env.device)
 
-    @torch.inference_mode()
+    # FSDP2's all-gather path temporarily preserves parameter version counters,
+    # which is incompatible with tensors created by inference_mode().  no_grad
+    # still avoids autograd storage while retaining those counters.
+    @torch.no_grad()
     def _forward_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
         output = self.model_parts[0](
             input_ids=input_ids,
@@ -170,7 +173,7 @@ class DeltaGenerationProbeRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         full_tensor = getattr(logits, "full_tensor", None)
         return full_tensor() if callable(full_tensor) else logits
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def _generate(self, prompt: str, mode: str) -> dict[str, Any]:
         input_ids = self._render(prompt)
         prompt_length = int(input_ids.shape[1])
@@ -277,4 +280,3 @@ class DeltaGenerationProbeRecipe(TrainFinetuneRecipeForNextTokenPrediction):
 
         dist.barrier()
         return 0
-
