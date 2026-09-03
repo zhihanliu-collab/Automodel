@@ -31,6 +31,21 @@ def _collect(sampler):
     return list(sampler)
 
 
+def test_uses_precomputed_dataset_lengths_without_loading_samples():
+    class DatasetWithLengths:
+        lengths = [30, 10, 20]
+
+        def __len__(self):
+            return len(self.lengths)
+
+        def __getitem__(self, _index):
+            raise AssertionError("precomputed lengths should avoid dataset reads")
+
+    sampler = LengthGroupedSampler(DatasetWithLengths(), num_replicas=1, rank=0)
+
+    assert sampler.lengths == [30, 10, 20]
+
+
 # ---------------------------------------------------------------------------
 # state_dict / load_state_dict
 # ---------------------------------------------------------------------------

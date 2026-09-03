@@ -407,6 +407,7 @@ class OdooCorpusDataset(Dataset):
         ]
         if not self.records:
             raise ValueError(f"No cached records for split={split!r}, sources={sorted(requested)}")
+        self.lengths = [int(record["length"]) for record in self.records]
         self.input_ids = np.memmap(root / "input_ids.i32", mode="r", dtype=np.int32)
         self.labels = np.memmap(root / "labels.i32", mode="r", dtype=np.int32)
 

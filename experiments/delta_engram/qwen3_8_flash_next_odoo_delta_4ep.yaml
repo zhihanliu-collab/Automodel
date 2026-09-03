@@ -82,6 +82,7 @@ dataloader:
     _target_: nemo_automodel.components.datasets.utils.default_collater
     pad_seq_len_divisible: 64
   shuffle: true
+  group_by_length: true
   num_workers: 2
   persistent_workers: true
   prefetch_factor: 2
@@ -110,6 +111,7 @@ validation_dataloader:
     _target_: nemo_automodel.components.datasets.utils.default_collater
     pad_seq_len_divisible: 64
   shuffle: false
+  group_by_length: true
   drop_last: true
   num_workers: 2
   persistent_workers: true

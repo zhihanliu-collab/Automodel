@@ -134,6 +134,15 @@ class LengthGroupedSampler(Sampler[int]):
     @staticmethod
     def _compute_lengths(dataset: Dataset) -> list[int]:
         """Compute token lengths for all samples."""
+        cached_lengths = getattr(dataset, "lengths", None)
+        if cached_lengths is not None:
+            if len(cached_lengths) != len(dataset):
+                raise ValueError(
+                    f"dataset.lengths has {len(cached_lengths)} entries for a dataset of size {len(dataset)}"
+                )
+            logger.info("Using %d precomputed dataset lengths.", len(cached_lengths))
+            return [int(length) for length in cached_lengths]
+
         # Fast path: access underlying list directly if available
         raw = dataset
         while hasattr(raw, "dataset"):
