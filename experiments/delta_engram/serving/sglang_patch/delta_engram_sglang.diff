@@ -1,0 +1,227 @@
+--- upstream_configs_qwen4_exp.py	2026-09-03 11:54:56.411093695 -0700
++++ configs_qwen4_exp.py	2026-09-03 11:55:06.332087010 -0700
+@@ -30,6 +30,8 @@
+         make_ngram_vocab_size_divisible_by=128,
+         ple_offload_embedding=False,
+         ple_embedding_dtype=None,
++        delta_engram_enabled=False,
++        delta_ngram_vocab_size_per_head=1000000,
+         index_share_for_mtp_iteration=True,
+         rope_parameters=None,
+         layer_types=None,
+@@ -72,6 +74,13 @@
+         self.ple_offload_embedding = ple_offload_embedding
+         # "float8_e4m3fn" keeps fp8 PLE tables fp8-resident; text_config-scoped.
+         self.ple_embedding_dtype = ple_embedding_dtype
++        # Delta-Engram (neo-cognition, 2026-09): an append-only second n-gram
++        # table + its own PLE reader, added at the same insertion point as the
++        # base PLE. Trained with nemo_automodel (delta-engram-automodel repo,
++        # nemo_automodel/components/models/qwen3_8_flash_next/engram.py); the
++        # checkpoint carries its hash layout as buffers, exactly like the base.
++        self.delta_engram_enabled = bool(delta_engram_enabled)
++        self.delta_ngram_vocab_size_per_head = int(delta_ngram_vocab_size_per_head)
+         # MTP draft decode steps reuse the draft-extend indexer selection
+         # (GLM-5.2 IndexShare); default on for Qwen4-Exp, checkpoint config
+         # or --json-model-override-args can disable it.
+@@ -87,11 +96,37 @@
+         return super().layers_block_type
+ 
+     @property
+-    def short_conv_layer_ids(self):
++    def base_short_conv_layer_ids(self):
+         if not self.ple_layer_ids:
+             return []
+         return sorted({int(layer_id) - 1 for layer_id in self.ple_layer_ids})
+ 
++    def delta_short_conv_layer_id(self, layer_id: int) -> int:
++        """The short-conv state slot of the Delta PLE that sits on ``layer_id``.
++
++        The Delta branch has its own causal short conv, so it needs its own
++        state slot in the ShortConvPool. The pool is keyed by layer id and the
++        KV-cache configurator keeps only ids inside the pipeline stage's
++        [start_layer, end_layer), so the slot must be a real layer index that
++        carries no PLE of its own: the mirror index ``num_hidden_layers-1-layer_id``
++        (46 for Flash-Next's single PLE at decoder index 1).
++        """
++        mirror = int(self.num_hidden_layers) - 1 - int(layer_id)
++        base_ids = set(self.base_short_conv_layer_ids)
++        if mirror in base_ids or not (0 <= mirror < int(self.num_hidden_layers)):
++            raise ValueError(
++                f"no free short-conv slot for the Delta PLE of layer {layer_id}: "
++                f"mirror={mirror} base_ids={sorted(base_ids)}"
++            )
++        return mirror
++
++    @property
++    def short_conv_layer_ids(self):
++        ids = list(self.base_short_conv_layer_ids)
++        if ids and getattr(self, "delta_engram_enabled", False):
++            ids.extend(self.delta_short_conv_layer_id(i) for i in list(ids))
++        return sorted(set(ids))
++
+     @property
+     def short_conv_state_shape(self):
+         if not self.short_conv_layer_ids:
+--- upstream_models_qwen4_exp.py	2026-09-03 11:54:56.402092794 -0700
++++ models_qwen4_exp.py	2026-09-03 11:55:06.340087811 -0700
+@@ -432,6 +432,8 @@
+         embedding_dim: int,
+         ple_layer_index: int = 0,
+         quant_config: Optional[QuantizationConfig] = None,
++        ngram_vocab_size_base: Optional[int] = None,
++        disable_hash_fusion: bool = False,
+     ) -> None:
+         super().__init__()
+         self.config = config
+@@ -450,7 +452,11 @@
+                 "ple_embed_dim must be divisible by total ngram heads: "
+                 f"{self.ngram_embed_dim} % {self.ngram_heads} != 0"
+             )
+-        self.ngram_vocab_size_base = int(config.ngram_vocab_size_base)
++        self.ngram_vocab_size_base = int(
++            config.ngram_vocab_size_base
++            if ngram_vocab_size_base is None
++            else ngram_vocab_size_base
++        )
+         if self.ngram_vocab_size_base <= 0:
+             raise ValueError("ngram_vocab_size_base must be > 0")
+         self.make_ngram_vocab_size_divisible_by = int(
+@@ -458,7 +464,12 @@
+         )
+         self.head_dim_per_ngram = self.ngram_embed_dim // self.ngram_heads
+         self.eos_token_id = int(config.eos_token_id)
+-        self.enable_ple_fusion = envs.SGLANG_ENABLE_QWEN4_PLE_FUSION.get()
++        # The Delta table's multipliers are ~2^62, so token*multiplier wraps in
++        # int64; the training code relies on torch's wrap + torch.remainder
++        # (sign of the divisor). Keep the Delta hash on that exact torch path.
++        self.enable_ple_fusion = (
++            envs.SGLANG_ENABLE_QWEN4_PLE_FUSION.get() and not disable_hash_fusion
++        )
+ 
+         self.register_buffer(
+             "layer_multipliers",
+@@ -877,9 +888,15 @@
+         prefix: str = "",
+         layer_id: Optional[int] = None,
+         ple_layer_index: int = 0,
++        ngram_vocab_size_base: Optional[int] = None,
++        disable_hash_fusion: bool = False,
++        conv_state_layer_id: Optional[int] = None,
+     ) -> None:
+         super().__init__()
+-        self.layer_id = layer_id
++        # `layer_id` is only used to address this branch's short-conv state in
++        # the pool; a Delta PLE passes its own slot (see
++        # Qwen4ExpTextConfig.delta_short_conv_layer_id).
++        self.layer_id = layer_id if conv_state_layer_id is None else conv_state_layer_id
+         self.hidden_size = config.hidden_size
+         self.ple_embed_dim = config.ple_embed_dim
+         self.conv_kernel_size = config.ple_conv_kernel_size
+@@ -890,6 +907,8 @@
+             self.ple_embed_dim,
+             ple_layer_index=ple_layer_index,
+             quant_config=quant_config,
++            ngram_vocab_size_base=ngram_vocab_size_base,
++            disable_hash_fusion=disable_hash_fusion,
+         )
+         if config.ple_offload_embedding:
+             self.ple_embedding.ngram_embedding = Qwen4ExpPinnedHostEmbedding(
+@@ -1229,6 +1248,7 @@
+         self.hc_count = config.hc_count
+         self.hidden_size = config.hidden_size
+         self.ple = None
++        self.delta_ple = None
+ 
+         for attr_name in (
+             "input_layernorm",
+@@ -1253,6 +1273,24 @@
+                 layer_id=layer_id,
+                 ple_layer_index=ple_layer_index,
+             )
++            if bool(getattr(config, "delta_engram_enabled", False)):
++                # Delta-Engram: a second, independently hashed n-gram table with
++                # its own reader (key/value proj, norms, short conv), read from
++                # the same pre-injection state as the base PLE and added to it.
++                if config.ple_offload_embedding:
++                    raise NotImplementedError(
++                        "Delta-Engram PLE does not support ple_offload_embedding"
++                    )
++                self.delta_ple = Qwen4ExpPLELayer(
++                    config,
++                    quant_config=quant_config,
++                    prefix=f"{ple_prefix}.delta_ple" if ple_prefix else "delta_ple",
++                    layer_id=layer_id,
++                    ple_layer_index=ple_layer_index,
++                    ngram_vocab_size_base=int(config.delta_ngram_vocab_size_per_head),
++                    disable_hash_fusion=True,
++                    conv_state_layer_id=config.delta_short_conv_layer_id(layer_id),
++                )
+ 
+         hc_config = HyperConnectionConfig(
+             hc_count=self.hc_count,
+@@ -1295,13 +1333,20 @@
+                         "non-idle Qwen4 PLE forward is missing its batch"
+                     )
+                 self.ple.forward_idle(forward_batch)
++                if self.delta_ple is not None:
++                    self.delta_ple.forward_idle(forward_batch)
+             else:
+                 ple_query = (
+                     hidden_states if residual is None else hidden_states + residual
+                 )
+-                hidden_states = hidden_states + self.ple(
+-                    ple_query, forward_batch, ple_batch
+-                )
++                ple_out = self.ple(ple_query, forward_batch, ple_batch)
++                if self.delta_ple is not None:
++                    # Same pre-injection state for both branches (training:
++                    # hidden += base_ple(x, ids); hidden += delta_ple(x, ids)).
++                    ple_out = ple_out + self.delta_ple(
++                        ple_query, forward_batch, ple_batch
++                    )
++                hidden_states = hidden_states + ple_out
+ 
+         hidden_states, residual = self.attn_hyper_connection.mix(hidden_states)
+         return hidden_states, residual
+@@ -1750,7 +1795,8 @@
+         buffers: dict,
+         loaded_buffers: Set[str],
+     ) -> bool:
+-        if ".ple.ple_embedding." not in name:
++        is_delta = ".delta_ple.ple_embedding." in name
++        if ".ple.ple_embedding." not in name and not is_delta:
+             return False
+         buffer_name = name.rsplit(".", 1)[-1]
+         if buffer_name.startswith("hashstats_"):
+@@ -1772,6 +1818,17 @@
+                 f"Shape mismatch for {name}: expected {tuple(buffer.shape)}, "
+                 f"got {tuple(loaded_weight.shape)}"
+             )
++        if is_delta and buffer_name in ("ngram_heads_offsets", "ngram_heads_vocab_sizes"):
++            # The Delta table was sized from delta_ngram_vocab_size_per_head at
++            # construction; the checkpoint's packed layout must be the same one,
++            # or rows would be read from the wrong head.
++            expected = buffer.detach().cpu()
++            got = loaded_weight.detach().to(dtype=buffer.dtype).cpu()
++            if not torch.equal(expected, got):
++                raise ValueError(
++                    f"Delta-Engram layout mismatch for {name}: "
++                    f"module={expected.tolist()} checkpoint={got.tolist()}"
++                )
+         buffer.copy_(loaded_weight.to(device=buffer.device, dtype=buffer.dtype))
+         loaded_buffers.add(name)
+         return True
+@@ -1969,9 +2026,10 @@
+                 continue
+             if load_qwen4_exp_ple_shard(name, loaded_weight):
+                 continue
+-            if ".ple.ple_embedding.ngram_embedding." in name and name.endswith(
+-                ".weight"
+-            ):
++            if (
++                ".ple.ple_embedding.ngram_embedding." in name
++                or ".delta_ple.ple_embedding.ngram_embedding." in name
++            ) and name.endswith(".weight"):
+                 raise ValueError(
+                     f"unsupported PLE weight layout (expected shard_N shards): {name}"
+                 )
