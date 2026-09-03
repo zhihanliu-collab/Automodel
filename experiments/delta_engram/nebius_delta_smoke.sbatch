@@ -28,12 +28,13 @@ TABLE_LR_MULT="${11:-10.0}"
 LR_WARMUP_STEPS="${12:-2}"
 MIN_LR="${13:-0.000001}"
 VAL_EVERY_STEPS="${14:-100}"
+LR_DECAY_STEPS="${15:-$MAX_STEPS}"
 CODE_ROOT=/home/zhihan/delta-engram-automodel
 DATA_ROOT=/mnt/data/zhihan/delta-engram
 
 mkdir -p "$DATA_ROOT/logs" "$DATA_ROOT/checkpoints"
 
-echo "[$(date -u +%FT%TZ)] delta start job=$SLURM_JOB_ID nodes=$SLURM_JOB_NODELIST rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT ep_size=$EP_SIZE cp_size=$CP_SIZE reader_lr=$READER_LR table_lr_mult=$TABLE_LR_MULT lr_warmup_steps=$LR_WARMUP_STEPS min_lr=$MIN_LR val_every_steps=$VAL_EVERY_STEPS"
+echo "[$(date -u +%FT%TZ)] delta start job=$SLURM_JOB_ID nodes=$SLURM_JOB_NODELIST rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT ep_size=$EP_SIZE cp_size=$CP_SIZE reader_lr=$READER_LR table_lr_mult=$TABLE_LR_MULT lr_warmup_steps=$LR_WARMUP_STEPS min_lr=$MIN_LR val_every_steps=$VAL_EVERY_STEPS lr_decay_steps=$LR_DECAY_STEPS"
 git -C "$CODE_ROOT" status --short --branch
 git -C "$CODE_ROOT" rev-parse HEAD
 
@@ -59,7 +60,7 @@ for NODE_RANK in "${!NODES[@]}"; do
       "$MAX_STEPS" "$CHECKPOINT_ENABLED" "$NODE_RANK" "$MASTER_ADDR" "$MASTER_PORT" "$SLURM_NNODES" \
       "$DELTA_ROWS_PER_HEAD" "$CHECKPOINT_TAG" "$RESTORE_FROM" "$NUM_EPOCHS" "$DATASET_LIMIT" \
       "$EP_SIZE" "$CP_SIZE" "$READER_LR" "$TABLE_LR_MULT" "$LR_WARMUP_STEPS" "$MIN_LR" \
-      "$VAL_EVERY_STEPS" &
+      "$VAL_EVERY_STEPS" "$LR_DECAY_STEPS" &
   STEP_PIDS+=("$!")
 done
 

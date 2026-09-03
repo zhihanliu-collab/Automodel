@@ -21,6 +21,7 @@ TABLE_LR_MULT="${15:-10.0}"
 LR_WARMUP_STEPS="${16:-2}"
 MIN_LR="${17:-0.000001}"
 VAL_EVERY_STEPS="${18:-100}"
+LR_DECAY_STEPS="${19:-$MAX_STEPS}"
 GPUS_PER_NODE=8
 WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 CONFIG=examples/llm_finetune/qwen/qwen3_8_flash_next_180b_hellaswag_ep64.yaml
@@ -50,7 +51,7 @@ if (( WORLD_SIZE % EP_SIZE != 0 || WORLD_SIZE % CP_SIZE != 0 )); then
   exit 2
 fi
 
-echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$NODE_RANK world_size=$WORLD_SIZE ep_size=$EP_SIZE cp_size=$CP_SIZE delta_rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT reader_lr=$READER_LR table_lr_mult=$TABLE_LR_MULT lr_warmup_steps=$LR_WARMUP_STEPS min_lr=$MIN_LR val_every_steps=$VAL_EVERY_STEPS"
+echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$NODE_RANK world_size=$WORLD_SIZE ep_size=$EP_SIZE cp_size=$CP_SIZE delta_rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT reader_lr=$READER_LR table_lr_mult=$TABLE_LR_MULT lr_warmup_steps=$LR_WARMUP_STEPS min_lr=$MIN_LR val_every_steps=$VAL_EVERY_STEPS lr_decay_steps=$LR_DECAY_STEPS"
 
 RESTORE_ARGS=()
 if [[ -n "$RESTORE_FROM" ]]; then
@@ -74,6 +75,7 @@ exec torchrun \
   --optimizer.weight_decay 0.0 \
   --optimizer.param_group_overrides "[{\"pattern\":\"\\\\.delta_ple\\\\.ple_embedding\\\\.ngram_embedding\\\\.weight$\",\"lr_mult\":$TABLE_LR_MULT,\"wd_mult\":0.0}]" \
   --lr_scheduler.lr_warmup_steps "$LR_WARMUP_STEPS" \
+  --lr_scheduler.lr_decay_steps "$LR_DECAY_STEPS" \
   --lr_scheduler.min_lr "$MIN_LR" \
   --step_scheduler.global_batch_size "$WORLD_SIZE" \
   --step_scheduler.max_steps "$MAX_STEPS" \
