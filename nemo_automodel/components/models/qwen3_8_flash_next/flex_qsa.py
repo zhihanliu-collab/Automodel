@@ -31,9 +31,27 @@ import torch
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 
+# Long-context training exercises separate static FlexAttention graph variants
+# for train forward, activation-checkpoint recomputation/backward, and eval.
+# With a bounded 1024-token shape vocabulary at 131K context, those variants
+# can still exceed Dynamo's process-wide default of 256.  Hitting that limit
+# silently falls back to eager math attention, which materializes the dense
+# score matrix and OOMs.  This budget covers the finite shape vocabulary while
+# retaining Dynamo's guard against an actually unbounded recompile loop.
+_MIN_FLEX_ACCUMULATED_RECOMPILE_LIMIT = 1024
+
+
+def _ensure_flex_compile_budget() -> None:
+    torch._dynamo.config.accumulated_recompile_limit = max(
+        torch._dynamo.config.accumulated_recompile_limit,
+        _MIN_FLEX_ACCUMULATED_RECOMPILE_LIMIT,
+    )
+
+
 @functools.cache
 def _compiled_flex():
     """Compile lazily so CPU-only imports never trigger inductor."""
+    _ensure_flex_compile_budget()
     return torch.compile(flex_attention, dynamic=False)
 
 

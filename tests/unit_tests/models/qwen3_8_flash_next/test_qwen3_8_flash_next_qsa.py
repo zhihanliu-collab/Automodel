@@ -18,6 +18,7 @@ import pytest
 import torch
 
 from nemo_automodel.components.models.common import BackendConfig
+from nemo_automodel.components.models.qwen3_8_flash_next import flex_qsa as qwen3_8_flash_next_flex_qsa
 from nemo_automodel.components.models.qwen3_8_flash_next import layers as qwen3_8_flash_next_layers
 from nemo_automodel.components.models.qwen3_8_flash_next import qsa as qwen3_8_flash_next_qsa
 from nemo_automodel.components.models.qwen3_8_flash_next.config import Qwen3_8_FlashNextTextConfig
@@ -79,6 +80,22 @@ def _backend() -> BackendConfig:
         rope_fusion=False,
         enable_hf_state_dict_adapter=False,
     )
+
+
+def test_flex_qsa_raises_accumulated_recompile_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch._dynamo.config, "accumulated_recompile_limit", 256)
+
+    qwen3_8_flash_next_flex_qsa._ensure_flex_compile_budget()
+
+    assert torch._dynamo.config.accumulated_recompile_limit == 1024
+
+
+def test_flex_qsa_preserves_larger_accumulated_recompile_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch._dynamo.config, "accumulated_recompile_limit", 2048)
+
+    qwen3_8_flash_next_flex_qsa._ensure_flex_compile_budget()
+
+    assert torch._dynamo.config.accumulated_recompile_limit == 2048
 
 
 def _freqs(batch_size: int, sequence_length: int, rotary_width: int = 4) -> torch.Tensor:
