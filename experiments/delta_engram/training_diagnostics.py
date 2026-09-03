@@ -48,9 +48,10 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
 
     Delta-on/off gate: the validation loader named by ``DELTA_GATE_VAL_NAME``
     (default ``offline_docs``) is scored twice at every validation step, once
-    normally and once with the Delta branch switched off. The first run whose
-    on-minus-off loss exceeds ``DELTA_GATE_TOLERANCE`` (default 0.0 nats) logs
-    the gap and stops training with :class:`DeltaGateFailed`: a Delta that makes
+    normally and once with the Delta branch switched off. From step
+    ``DELTA_GATE_MIN_STEP`` (default 100) on, the first run whose on-minus-off
+    loss exceeds ``DELTA_GATE_TOLERANCE`` (default 0.03 nats) logs the gap and
+    stops training with :class:`DeltaGateFailed`: a Delta that makes
     text it was trained on *less* likely than the frozen base is the failure
     mode that cost the first checkpoint 8 of 100 tasks.
     """
@@ -87,7 +88,11 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         self._diag_table_module = self._diag_delta_ple.ple_embedding.ngram_embedding
         self._diag_delta_layer = layer
         self._gate_val_name = os.environ.get("DELTA_GATE_VAL_NAME", "offline_docs")
-        self._gate_tolerance = float(os.environ.get("DELTA_GATE_TOLERANCE", "0.0"))
+        self._gate_tolerance = float(os.environ.get("DELTA_GATE_TOLERANCE", "0.03"))
+        # A freshly initialized Delta (zero table, copied reader) adds a small
+        # random perturbation before it has learned anything: the 3-step smoke
+        # measured +0.014 nats at step 1. The gate is armed only from this step on.
+        self._gate_min_step = int(os.environ.get("DELTA_GATE_MIN_STEP", "100"))
         self._gate_pending: dict[str, float] | None = None
         self._gate_failed_message: str | None = None
         ngram_reader = self._diag_delta_ple.ple_embedding
@@ -313,7 +318,7 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
                 "gate/delta_on_minus_off": on_loss - off_loss,
                 "gate/tolerance": self._gate_tolerance,
             }
-            if on_loss - off_loss > self._gate_tolerance:
+            if int(sample.step) >= self._gate_min_step and on_loss - off_loss > self._gate_tolerance:
                 self._gate_failed_message = (
                     f"Delta gate failed on {self._gate_val_name!r} at step {int(sample.step)}: "
                     f"delta_on={on_loss:.4f} delta_off={off_loss:.4f} gap={on_loss - off_loss:+.4f} > {self._gate_tolerance}"
