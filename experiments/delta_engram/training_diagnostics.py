@@ -18,13 +18,16 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable
+import math
+import os
 from typing import Any
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from experiments.delta_engram.generation_probe import _difference_stats, _tensor_stats
+from experiments.delta_engram.generation_probe import _difference_stats, _local_tensor, _tensor_stats
 from nemo_automodel.components.loggers.metric_logger import MetricsSample
 from nemo_automodel.recipes.llm.train_ft import TrainFinetuneRecipeForNextTokenPrediction
 from nemo_automodel.shared.import_utils import safe_import
@@ -64,10 +67,71 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         self._diag_best_val_steps: dict[str, int] = {}
         self._diag_parameter_metrics_step = -1
         self._diag_parameter_metrics: dict[str, float] = {}
+        self._diag_table_module = self._diag_delta_ple.ple_embedding.ngram_embedding
+        ngram_reader = self._diag_delta_ple.ple_embedding
+        self._diag_head_sizes = [int(value) for value in ngram_reader.ngram_heads_vocab_sizes.tolist()]
+        self._diag_head_offsets = [int(value) for value in ngram_reader.ngram_heads_offsets.tolist()]
+        self._diag_step0_touched_bitmap: torch.Tensor | None = None
+        self._diag_step0_grad_bitmap: torch.Tensor | None = None
+        access_path = os.environ.get("DELTA_ACCESS_COUNTS_PATH")
+        self._diag_access_counts = (
+            np.memmap(access_path, mode="r", dtype=np.uint32) if access_path and os.path.exists(access_path) else None
+        )
         self._diag_hook_handles = [
             self._diag_base_ple.register_forward_hook(self._make_activation_hook("base_output")),
             self._diag_delta_ple.register_forward_hook(self._make_activation_hook("delta_output", capture_input=True)),
+            self._diag_table_module.register_forward_pre_hook(self._capture_step0_touched_rows),
+            self._diag_table_module.weight.register_hook(self._capture_step0_row_grads),
         ]
+
+    def _capture_step0_touched_rows(self, _module: nn.Module, inputs: tuple[torch.Tensor, ...]) -> None:
+        if int(self.step_scheduler.step) != 0 or not inputs:
+            return
+        row_ids = inputs[0].detach().reshape(-1)
+        if self._diag_step0_touched_bitmap is None:
+            self._diag_step0_touched_bitmap = torch.zeros(
+                int(self._diag_table_module.num_embeddings), dtype=torch.uint8, device=row_ids.device
+            )
+        self._diag_step0_touched_bitmap[row_ids.unique()] = 1
+
+    def _capture_step0_row_grads(self, gradient: torch.Tensor) -> torch.Tensor:
+        if int(self.step_scheduler.step) != 0:
+            return gradient
+        local = _local_tensor(gradient).detach().float()
+        row_norms = local.square().sum(dim=-1).sqrt()
+        bitmap = torch.zeros(
+            int(self._diag_table_module.num_embeddings), dtype=torch.uint8, device=row_norms.device
+        )
+        global_start = int(self._diag_table_module.global_row_start)
+        global_end = int(self._diag_table_module.global_row_end)
+        for head, (offset, size) in enumerate(zip(self._diag_head_offsets, self._diag_head_sizes, strict=True)):
+            start = max(offset, global_start)
+            end = min(offset + size, global_end)
+            if end > start:
+                local_slice = row_norms[start - global_start : end - global_start]
+                local_nonzero = torch.nonzero(local_slice, as_tuple=False).flatten()
+                bitmap[start + local_nonzero] = 1
+        self._diag_step0_grad_bitmap = bitmap
+        return gradient
+
+    def _step0_gradient_metrics(self) -> dict[str, float]:
+        bitmap = self._diag_step0_touched_bitmap
+        gradient_bitmap = self._diag_step0_grad_bitmap
+        if bitmap is None or gradient_bitmap is None:
+            return {}
+        dist.all_reduce(bitmap, op=dist.ReduceOp.MAX)
+        dist.all_reduce(gradient_bitmap, op=dist.ReduceOp.MAX)
+        metrics: dict[str, float] = {}
+        for head, (offset, size) in enumerate(zip(self._diag_head_offsets, self._diag_head_sizes, strict=True)):
+            touched = float(torch.count_nonzero(bitmap[offset : offset + size]).item())
+            nonzero_grad = float(torch.count_nonzero(gradient_bitmap[offset : offset + size]).item())
+            prefix = f"delta/step0/head_{head:02d}"
+            metrics[f"{prefix}/touched_rows"] = touched
+            metrics[f"{prefix}/grad_nonzero_rows"] = nonzero_grad
+            metrics[f"{prefix}/grad_to_touched"] = nonzero_grad / max(touched, 1.0)
+        self._diag_step0_touched_bitmap = None
+        self._diag_step0_grad_bitmap = None
+        return metrics
 
     def _make_activation_hook(
         self, name: str, *, capture_input: bool = False
@@ -109,6 +173,8 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         return hook
 
     def log_train_metrics(self, log_data: MetricsSample) -> None:
+        if int(log_data.step) == 0:
+            log_data.metrics.update(self._step0_gradient_metrics())
         loss = float(log_data.metrics["loss"])
         if self._diag_train_loss_ema is None:
             self._diag_train_loss_ema = loss
@@ -172,7 +238,88 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             "delta/value_proj/cosine_to_initial": value["cosine_to_initial"],
             "delta/value_proj/delta_rms": value["delta_rms"],
         }
+        self._diag_parameter_metrics.update(self._collect_row_metrics())
         return self._diag_parameter_metrics
+
+    def _collect_row_metrics(self) -> dict[str, float]:
+        local_weight = _local_tensor(self._diag_table_module.weight).detach()
+        global_start = int(self._diag_table_module.global_row_start)
+        global_end = int(self._diag_table_module.global_row_end)
+        device = local_weight.device
+        metrics: dict[str, float] = {}
+        histogram_bins = 104
+        for head, (offset, size) in enumerate(zip(self._diag_head_offsets, self._diag_head_sizes, strict=True)):
+            start = max(offset, global_start)
+            end = min(offset + size, global_end)
+            if end > start:
+                rows = local_weight[start - global_start : end - global_start].float()
+                norms = rows.square().sum(dim=-1).sqrt()
+            else:
+                norms = local_weight.new_empty((0,), dtype=torch.float32)
+            packed = torch.tensor(
+                [
+                    norms.numel(),
+                    torch.count_nonzero(norms).item(),
+                    torch.count_nonzero(norms > 1e-8).item(),
+                    torch.count_nonzero(norms > 1e-6).item(),
+                    torch.count_nonzero(norms > 1e-4).item(),
+                    norms.sum().item(),
+                    norms.square().sum().item(),
+                ],
+                dtype=torch.float64,
+                device=device,
+            )
+            dist.all_reduce(packed, op=dist.ReduceOp.SUM)
+            local_max = norms.max().double() if norms.numel() else torch.zeros((), dtype=torch.float64, device=device)
+            dist.all_reduce(local_max, op=dist.ReduceOp.MAX)
+            log_norms = norms.clamp_min(1e-12).log10()
+            histogram = torch.histc(log_norms, bins=histogram_bins, min=-12.0, max=1.0).double()
+            dist.all_reduce(histogram, op=dist.ReduceOp.SUM)
+            prefix = f"delta/table/head_{head:02d}"
+            count = float(packed[0].item())
+            metrics[f"{prefix}/row_nonzero_fraction"] = float(packed[1].item()) / max(count, 1.0)
+            metrics[f"{prefix}/row_above_1e-8_fraction"] = float(packed[2].item()) / max(count, 1.0)
+            metrics[f"{prefix}/row_above_1e-6_fraction"] = float(packed[3].item()) / max(count, 1.0)
+            metrics[f"{prefix}/row_above_1e-4_fraction"] = float(packed[4].item()) / max(count, 1.0)
+            metrics[f"{prefix}/row_norm_mean"] = float(packed[5].item()) / max(count, 1.0)
+            metrics[f"{prefix}/row_norm_rms"] = math.sqrt(float(packed[6].item()) / max(count, 1.0))
+            metrics[f"{prefix}/row_norm_max"] = float(local_max.item())
+            cumulative = histogram.cumsum(0)
+            for quantile in (0.5, 0.9, 0.99):
+                target = quantile * max(float(cumulative[-1].item()), 1.0)
+                bin_index = int(
+                    torch.searchsorted(
+                        cumulative, torch.tensor(target, dtype=torch.float64, device=device)
+                    ).item()
+                )
+                log_value = -12.0 + (min(bin_index, histogram_bins - 1) + 0.5) * 13.0 / histogram_bins
+                metrics[f"{prefix}/row_norm_p{int(quantile * 100)}_approx"] = 10.0**log_value
+
+            if self._diag_access_counts is not None and end > start:
+                access = torch.from_numpy(
+                    np.asarray(self._diag_access_counts[start:end], dtype=np.float64)
+                ).to(device=device)
+                y = norms.double()
+                corr_sums = torch.stack(
+                    [
+                        torch.tensor(float(len(y)), dtype=torch.float64, device=device),
+                        access.sum(),
+                        y.sum(),
+                        access.square().sum(),
+                        y.square().sum(),
+                        (access * y).sum(),
+                    ]
+                )
+            else:
+                corr_sums = torch.zeros(6, dtype=torch.float64, device=device)
+            dist.all_reduce(corr_sums, op=dist.ReduceOp.SUM)
+            n, sum_x, sum_y, sum_xx, sum_yy, sum_xy = corr_sums.tolist()
+            covariance = n * sum_xy - sum_x * sum_y
+            denominator = math.sqrt(
+                max(n * sum_xx - sum_x * sum_x, 0.0) * max(n * sum_yy - sum_y * sum_y, 0.0)
+            )
+            metrics[f"{prefix}/access_count_row_norm_pearson"] = covariance / max(denominator, 1e-30)
+        return metrics
 
     def _collect_delta_metrics(self, step: int) -> dict[str, float]:
         metrics = self._collect_parameter_metrics(step).copy()
