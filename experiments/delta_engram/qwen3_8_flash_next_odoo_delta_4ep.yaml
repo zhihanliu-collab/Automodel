@@ -50,6 +50,11 @@ model:
 checkpoint:
   enabled: true
   checkpoint_dir: /mnt/data/zhihan/delta-engram/checkpoints/odoo-delta-4ep
+  # The upstream multi-validation checkpoint path defaults to a loader named
+  # "default".  Our validation loaders are source-named, so select the
+  # agent bucket explicitly (the dominant held-out token mass and primary
+  # behavioral target) while retaining all three source metrics in W&B.
+  best_metric_key: agent_trajectories
   model_save_format: safetensors
   save_consolidated: false
   max_recent_checkpoints: null
