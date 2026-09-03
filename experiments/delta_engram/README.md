@@ -124,7 +124,8 @@ sbatch experiments/delta_engram/nebius_delta_smoke.sbatch \
 Arguments 8 and 9 select expert and context parallelism; arguments 10--13 select
 the Delta-PLE reader LR, Delta-table LR multiplier, warmup steps, and minimum LR.
 Argument 14 optionally sets the validation interval, and argument 15 sets LR
-decay steps (defaulting to the run's maximum steps). Job `4583`
+decay steps (defaulting to the run's maximum steps). Argument 16 selects an
+alternate recipe. Job `4583`
 verified that EP8 + CP8 (DP4) can execute complete optimizer steps, but its first
 two eight-step epoch means rose from `4.1616` to `5.2330` at reader/table peak LRs
 of `1e-4`/`1e-3`, so that unstable run was stopped. The lower-LR diagnostic uses
