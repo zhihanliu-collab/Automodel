@@ -23,6 +23,8 @@ MIN_LR="${17:-0.000001}"
 VAL_EVERY_STEPS="${18:-100}"
 LR_DECAY_STEPS="${19:-$MAX_STEPS}"
 CONFIG_PATH="${20:-examples/llm_finetune/qwen/qwen3_8_flash_next_180b_hellaswag_ep64.yaml}"
+GLOBAL_BATCH_SIZE="${21:-}"
+CKPT_EVERY_STEPS="${22:-$MAX_STEPS}"
 GPUS_PER_NODE=8
 WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 RUN_ROOT=/mnt/data/zhihan/delta-engram
@@ -51,7 +53,18 @@ if (( WORLD_SIZE % EP_SIZE != 0 || WORLD_SIZE % CP_SIZE != 0 )); then
   exit 2
 fi
 
-echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$NODE_RANK world_size=$WORLD_SIZE ep_size=$EP_SIZE cp_size=$CP_SIZE delta_rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT reader_lr=$READER_LR table_lr_mult=$TABLE_LR_MULT lr_warmup_steps=$LR_WARMUP_STEPS min_lr=$MIN_LR val_every_steps=$VAL_EVERY_STEPS lr_decay_steps=$LR_DECAY_STEPS config_path=$CONFIG_PATH"
+# One sample is distributed over CP_SIZE ranks.  The maximum batch with no
+# gradient accumulation is therefore the data-parallel replica count, not the
+# raw world size.
+if [[ -z "$GLOBAL_BATCH_SIZE" ]]; then
+  GLOBAL_BATCH_SIZE=$((WORLD_SIZE / CP_SIZE))
+fi
+if (( GLOBAL_BATCH_SIZE < 1 )); then
+  echo "GLOBAL_BATCH_SIZE must be positive, got $GLOBAL_BATCH_SIZE" >&2
+  exit 2
+fi
+
+echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$NODE_RANK world_size=$WORLD_SIZE ep_size=$EP_SIZE cp_size=$CP_SIZE global_batch_size=$GLOBAL_BATCH_SIZE delta_rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT reader_lr=$READER_LR table_lr_mult=$TABLE_LR_MULT lr_warmup_steps=$LR_WARMUP_STEPS min_lr=$MIN_LR val_every_steps=$VAL_EVERY_STEPS ckpt_every_steps=$CKPT_EVERY_STEPS lr_decay_steps=$LR_DECAY_STEPS config_path=$CONFIG_PATH"
 
 RESTORE_ARGS=()
 if [[ -n "$RESTORE_FROM" ]]; then
@@ -82,10 +95,10 @@ exec torchrun \
   --lr_scheduler.lr_warmup_steps "$LR_WARMUP_STEPS" \
   --lr_scheduler.lr_decay_steps "$LR_DECAY_STEPS" \
   --lr_scheduler.min_lr "$MIN_LR" \
-  --step_scheduler.global_batch_size "$WORLD_SIZE" \
+  --step_scheduler.global_batch_size "$GLOBAL_BATCH_SIZE" \
   --step_scheduler.max_steps "$MAX_STEPS" \
   --step_scheduler.num_epochs "$NUM_EPOCHS" \
-  --step_scheduler.ckpt_every_steps "$MAX_STEPS" \
+  --step_scheduler.ckpt_every_steps "$CKPT_EVERY_STEPS" \
   --step_scheduler.val_every_steps "$VAL_EVERY_STEPS" \
   "${DATASET_ARGS[@]}" \
   --checkpoint.enabled "$CHECKPOINT_ENABLED" \
