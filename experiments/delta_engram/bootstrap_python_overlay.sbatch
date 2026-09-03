@@ -62,5 +62,5 @@ srun --nodes=1 --ntasks=1 --gpus-per-node=1 --cpus-per-task=4 --mem=16G \
         causal-conv1d==1.6.0
 
     PYTHONPATH=/mnt/data/zhihan/delta-engram/python-overlay \
-      python -c "import causal_conv1d_cuda; from fla.modules.convolution import causal_conv1d; print(\"causal-conv1d CUDA fast path OK\")"
+      python -c "import torch; import causal_conv1d_cuda; from fla.modules.convolution import causal_conv1d; print(\"causal-conv1d CUDA fast path OK\")"
   '

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=q38-delta-ep8cp8
+#SBATCH --job-name=q38-delta
 #SBATCH --partition=b200
 #SBATCH --nodes=4
 #SBATCH --nodelist=b200-[2-5]
