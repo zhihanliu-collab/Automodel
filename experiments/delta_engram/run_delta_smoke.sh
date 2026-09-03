@@ -10,11 +10,13 @@ MASTER_ADDR="${4:?master address is required}"
 MASTER_PORT="${5:?master port is required}"
 NNODES="${6:?node count is required}"
 DELTA_ROWS_PER_HEAD="${7:-1000000}"
+CHECKPOINT_TAG="${8:-delta-smoke-${SLURM_JOB_ID}}"
+RESTORE_FROM="${9:-}"
 GPUS_PER_NODE=8
 WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 CONFIG=examples/llm_finetune/qwen/qwen3_8_flash_next_180b_hellaswag_ep64.yaml
 RUN_ROOT=/mnt/data/zhihan/delta-engram
-CHECKPOINT_DIR="$RUN_ROOT/checkpoints/delta-smoke-${SLURM_JOB_ID}"
+CHECKPOINT_DIR="$RUN_ROOT/checkpoints/$CHECKPOINT_TAG"
 LOCAL_CACHE_ROOT="/tmp/zhihan/delta-engram-${SLURM_JOB_ID}"
 
 export PYTHONNOUSERSITE=1
@@ -34,7 +36,12 @@ export CUDA_CACHE_PATH="$LOCAL_CACHE_ROOT/cuda"
 
 mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH"
 
-echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$NODE_RANK world_size=$WORLD_SIZE delta_rows_per_head=$DELTA_ROWS_PER_HEAD"
+echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$NODE_RANK world_size=$WORLD_SIZE delta_rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM"
+
+RESTORE_ARGS=()
+if [[ -n "$RESTORE_FROM" ]]; then
+  RESTORE_ARGS+=(--checkpoint.restore_from "$RESTORE_FROM")
+fi
 
 exec torchrun \
   --nnodes="$NNODES" \
@@ -59,4 +66,5 @@ exec torchrun \
   --checkpoint.enabled "$CHECKPOINT_ENABLED" \
   --checkpoint.checkpoint_dir "$CHECKPOINT_DIR" \
   --checkpoint.trainable_only true \
+  "${RESTORE_ARGS[@]}" \
   --wandb.enable false

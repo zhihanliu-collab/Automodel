@@ -17,12 +17,14 @@ set -eo pipefail
 MAX_STEPS="${1:-2}"
 CHECKPOINT_ENABLED="${2:-false}"
 DELTA_ROWS_PER_HEAD="${3:-1000000}"
+CHECKPOINT_TAG="${4:-delta-smoke-${SLURM_JOB_ID}}"
+RESTORE_FROM="${5:-}"
 CODE_ROOT=/home/zhihan/delta-engram-automodel
 DATA_ROOT=/mnt/data/zhihan/delta-engram
 
 mkdir -p "$DATA_ROOT/logs" "$DATA_ROOT/checkpoints"
 
-echo "[$(date -u +%FT%TZ)] delta start job=$SLURM_JOB_ID nodes=$SLURM_JOB_NODELIST rows_per_head=$DELTA_ROWS_PER_HEAD"
+echo "[$(date -u +%FT%TZ)] delta start job=$SLURM_JOB_ID nodes=$SLURM_JOB_NODELIST rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM"
 git -C "$CODE_ROOT" status --short --branch
 git -C "$CODE_ROOT" rev-parse HEAD
 
@@ -46,7 +48,7 @@ for NODE_RANK in "${!NODES[@]}"; do
     --container-workdir=/workspace \
     bash experiments/delta_engram/run_delta_smoke.sh \
       "$MAX_STEPS" "$CHECKPOINT_ENABLED" "$NODE_RANK" "$MASTER_ADDR" "$MASTER_PORT" "$SLURM_NNODES" \
-      "$DELTA_ROWS_PER_HEAD" &
+      "$DELTA_ROWS_PER_HEAD" "$CHECKPOINT_TAG" "$RESTORE_FROM" &
   STEP_PIDS+=("$!")
 done
 

@@ -91,3 +91,15 @@ base LR and the Delta table at a 10x LR multiplier with zero weight decay.
 
 For fast architecture debugging, the third argument may reduce the nominal
 rows per head. Acceptance and Odoo runs must use `1000000`.
+
+To exercise a trainable-only DCP save and resume without serializing the frozen
+base model, use a stable checkpoint tag across both jobs:
+
+```bash
+sbatch experiments/delta_engram/nebius_delta_smoke.sbatch 2 true 1000000 delta-roundtrip
+sbatch experiments/delta_engram/nebius_delta_smoke.sbatch 3 true 1000000 delta-roundtrip LATEST
+```
+
+`checkpoint.trainable_only=true` still loads the complete Hugging Face base
+checkpoint during initialization. Training checkpoints contain only the Delta
+table and Delta-PLE K/V model state, plus their optimizer and scheduler state.
