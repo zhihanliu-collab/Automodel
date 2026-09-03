@@ -59,7 +59,9 @@ fi
 
 echo "[$(date -u +%FT%TZ)] delta start job=$SLURM_JOB_ID nodes=$SLURM_JOB_NODELIST rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT ep_size=$EP_SIZE cp_size=$CP_SIZE global_batch_size=${GLOBAL_BATCH_SIZE:-auto} reader_lr=$READER_LR table_lr_mult=$TABLE_LR_MULT lr_warmup_steps=$LR_WARMUP_STEPS min_lr=$MIN_LR val_every_steps=$VAL_EVERY_STEPS ckpt_every_steps=$CKPT_EVERY_STEPS lr_decay_steps=$LR_DECAY_STEPS config_path=$CONFIG_PATH access_counts=${DELTA_ACCESS_COUNTS_PATH:-disabled}"
 git -C "$CODE_ROOT" status --short --branch
-git -C "$CODE_ROOT" rev-parse HEAD
+export EXPECTED_CODE_COMMIT
+EXPECTED_CODE_COMMIT=$(git -C "$CODE_ROOT" rev-parse HEAD)
+echo "expected_code_commit=$EXPECTED_CODE_COMMIT"
 
 MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 MASTER_PORT=$((23000 + SLURM_JOB_ID % 10000))

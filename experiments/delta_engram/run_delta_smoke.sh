@@ -52,6 +52,12 @@ export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-1}"
 
 mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH"
 
+LOCAL_CODE_COMMIT=$(git -C /workspace rev-parse HEAD)
+if [[ -n "${EXPECTED_CODE_COMMIT:-}" && "$LOCAL_CODE_COMMIT" != "$EXPECTED_CODE_COMMIT" ]]; then
+  echo "Code revision mismatch on $(hostname): expected=$EXPECTED_CODE_COMMIT local=$LOCAL_CODE_COMMIT" >&2
+  exit 2
+fi
+
 if (( WORLD_SIZE % EP_SIZE != 0 || WORLD_SIZE % CP_SIZE != 0 )); then
   echo "EP_SIZE=$EP_SIZE and CP_SIZE=$CP_SIZE must each divide WORLD_SIZE=$WORLD_SIZE" >&2
   exit 2
