@@ -35,6 +35,19 @@ DATA_ROOT=/mnt/data/zhihan/delta-engram
 
 mkdir -p "$DATA_ROOT/logs" "$DATA_ROOT/checkpoints"
 
+# Slurm/pyxis does not expose the login node's ~/.netrc inside the container.
+# Resolve the W&B credential in the host job environment and let srun pass it
+# through without writing the secret to the job script or logs.
+if [[ -z "${WANDB_API_KEY:-}" ]]; then
+  WANDB_API_KEY=$(python3 -c "import netrc; a=netrc.netrc().authenticators('api.wandb.ai'); print(a[2] if a else '', end='')" 2>/dev/null || true)
+fi
+if [[ -n "$WANDB_API_KEY" ]]; then
+  export WANDB_API_KEY
+  echo "wandb credential: present"
+else
+  echo "wandb credential: missing"
+fi
+
 echo "[$(date -u +%FT%TZ)] delta start job=$SLURM_JOB_ID nodes=$SLURM_JOB_NODELIST rows_per_head=$DELTA_ROWS_PER_HEAD checkpoint_tag=$CHECKPOINT_TAG restore_from=$RESTORE_FROM num_epochs=$NUM_EPOCHS dataset_limit=$DATASET_LIMIT ep_size=$EP_SIZE cp_size=$CP_SIZE reader_lr=$READER_LR table_lr_mult=$TABLE_LR_MULT lr_warmup_steps=$LR_WARMUP_STEPS min_lr=$MIN_LR val_every_steps=$VAL_EVERY_STEPS lr_decay_steps=$LR_DECAY_STEPS config_path=$CONFIG_PATH"
 git -C "$CODE_ROOT" status --short --branch
 git -C "$CODE_ROOT" rev-parse HEAD
