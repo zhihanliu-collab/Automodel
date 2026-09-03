@@ -130,7 +130,7 @@ validation_dataloader:
     pad_seq_len_divisible: 1024
   shuffle: false
   group_by_length: true
-  # The docs gate bucket has 2 samples; drop_last would discard them under DP4.
+  # Keep partial final batches so small buckets (docs gate: 32 samples) are fully scored.
   drop_last: false
   num_workers: 2
   persistent_workers: true
