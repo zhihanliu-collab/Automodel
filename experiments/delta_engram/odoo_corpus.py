@@ -1,5 +1,10 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
-"""Build and read a compact, source-aware Odoo continual-training corpus."""
+"""Build and read a compact, source-aware Odoo continual-training corpus.
+
+v2 sources: reference documents (handbook, tutorial; full NTP, repeated), per-bill chatter
+threads (full NTP, no bill JSON), agentic memory edits with synthesized reasoning
+(assistant-only, last turn), and agent trajectories (assistant-only).
+"""
 
 from __future__ import annotations
 
@@ -22,11 +27,12 @@ import torch
 from torch.utils.data import Dataset
 
 
-FORMAT_VERSION = 1
-SOURCE_BILLS = "offline_bills_messages"
+FORMAT_VERSION = 2
+SOURCE_DOCS = "offline_docs"
+SOURCE_MESSAGES = "offline_messages"
 SOURCE_MEMORY = "memory_edits"
 SOURCE_AGENTS = "agent_trajectories"
-ALL_SOURCES = (SOURCE_BILLS, SOURCE_MEMORY, SOURCE_AGENTS)
+ALL_SOURCES = (SOURCE_DOCS, SOURCE_MESSAGES, SOURCE_MEMORY, SOURCE_AGENTS)
 SOURCE_TO_ID = {source: index for index, source in enumerate(ALL_SOURCES)}
 _BILL_ID_RE = re.compile(r"bill\s*\(id=(\d+)\)", re.IGNORECASE)
 _WORKER_TOKENIZER: Any | None = None
@@ -72,27 +78,70 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         return [json.loads(line) for line in stream if line.strip()]
 
 
-def _bill_tasks(path: Path, validation_fraction: float, seed: int) -> list[dict[str, Any]]:
+def _doc_tasks(paths: list[Path], repeat: int) -> list[dict[str, Any]]:
+    """Whole reference documents (handbook, tutorial) as full next-token-prediction text.
+
+    Each document is emitted ``repeat`` times per epoch so two short files are
+    not drowned by hundreds of long trajectories. Documents are train-only: the
+    Delta-on vs Delta-off gate scores them directly during validation.
+    """
+    if repeat <= 0:
+        raise ValueError(f"docs repeat must be positive, got {repeat}")
+    tasks = []
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        for index in range(repeat):
+            tasks.append(
+                {
+                    "source": SOURCE_DOCS,
+                    "split": "train",
+                    "group": path.name,
+                    "sample_id": f"doc-{path.stem}-{index:02d}",
+                    "mode": "full_ntp",
+                    "text": text,
+                }
+            )
+    return tasks
+
+
+def _render_message(message: dict[str, Any]) -> str:
+    author = (message.get("author") or {}).get("name") or "unknown"
+    recipients = ", ".join(r.get("name", "?") for r in (message.get("recipients") or [])) or "-"
+    subject = message.get("subject") or ""
+    attachments = ", ".join(a.get("name", "?") for a in (message.get("attachments") or []))
+    body = _html_to_text(message.get("body_html", ""))
+    head = f"[{message.get('date')}] {author} -> {recipients} ({message.get('message_type')})"
+    if subject:
+        head += f" | {subject}"
+    if attachments:
+        head += f" | attachments: {attachments}"
+    return f"{head}\n{body}".rstrip()
+
+
+def _message_tasks(path: Path, validation_fraction: float, seed: int) -> list[dict[str, Any]]:
+    """Per-bill chatter threads (e-mails, comments, notifications) as plain text; no bill JSON."""
     rows = _read_jsonl(path)
     val_groups = _stable_validation_groups((str(row["bill_id"]) for row in rows), validation_fraction, seed)
     tasks = []
     for row in rows:
-        cleaned = copy.deepcopy(row)
-        for message in cleaned.get("messages", []):
-            message["body_text"] = _html_to_text(message.pop("body_html", ""))
+        messages = sorted(row.get("messages") or [], key=lambda m: str(m.get("date")))
+        if not messages:
+            continue
+        header = row.get("header") or {}
+        vendor = header.get("vendor")
+        vendor_name = vendor.get("name") if isinstance(vendor, dict) else vendor
         text = (
-            "Odoo offline accounts-payable record.\n"
-            f"Snapshot: {cleaned.get('snapshot')}\n"
-            "The following JSON contains the complete vendor bill, line items, attachments, and linked messages.\n"
-            + json.dumps(cleaned, ensure_ascii=False, indent=2, sort_keys=True)
+            f"Acme Home Builders accounts payable. Chatter thread of vendor bill {header.get('ref') or row['bill_id']} "
+            f"(vendor: {vendor_name}, invoice date: {header.get('invoice_date')}, state: {header.get('state')}).\n\n"
+            + "\n\n".join(_render_message(message) for message in messages)
         )
         group = str(row["bill_id"])
         tasks.append(
             {
-                "source": SOURCE_BILLS,
+                "source": SOURCE_MESSAGES,
                 "split": "validation" if group in val_groups else "train",
                 "group": group,
-                "sample_id": f"bill-{group}",
+                "sample_id": f"messages-{group}",
                 "mode": "full_ntp",
                 "text": text,
             }
@@ -101,50 +150,28 @@ def _bill_tasks(path: Path, validation_fraction: float, seed: int) -> list[dict[
 
 
 def _memory_tasks(path: Path, validation_fraction: float, seed: int) -> list[dict[str, Any]]:
-    edits: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, start=1):
-            event = json.loads(line)
-            if event.get("type") != "assistant":
-                continue
-            for block_index, block in enumerate((event.get("message") or {}).get("content") or []):
-                if not isinstance(block, dict) or block.get("type") != "tool_use":
-                    continue
-                operation = block.get("name")
-                args = block.get("input") or {}
-                file_path = str(args.get("file_path", ""))
-                if operation not in ("Write", "Edit") or "/memory/" not in file_path:
-                    continue
-                file_name = Path(file_path).name
-                if operation == "Write":
-                    instruction = f"Write the grounded Odoo AP memory document memory/{file_name}."
-                    answer = args["content"]
-                else:
-                    instruction = (
-                        f"Update the grounded Odoo AP memory document memory/{file_name}.\n\n"
-                        f"Existing passage:\n{args['old_string']}"
-                    )
-                    answer = args["new_string"]
-                edits.append(
-                    {
-                        "source": SOURCE_MEMORY,
-                        "group": file_name,
-                        "sample_id": f"memory-{line_number}-{block_index}",
-                        "mode": "assistant_only",
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": "Maintain only source-grounded knowledge about this Odoo accounts-payable world.",
-                            },
-                            {"role": "user", "content": instruction},
-                            {"role": "assistant", "content": answer},
-                        ],
-                    }
-                )
-    val_groups = _stable_validation_groups((task["group"] for task in edits), validation_fraction, seed)
-    for task in edits:
-        task["split"] = "validation" if task["group"] in val_groups else "train"
-    return edits
+    """Agentic memory-edit samples built by ``build_memory_edit_samples.py`` (with synthesized reasoning)."""
+    rows = _read_jsonl(path)
+    val_groups = _stable_validation_groups((row["group"] for row in rows), validation_fraction, seed)
+    tasks = []
+    for row in rows:
+        target = row["messages"][-1]
+        if target.get("role") != "assistant" or not target.get("tool_calls"):
+            raise ValueError(f"{row['sample_id']}: last message must be the supervised assistant edit")
+        if not target.get("reasoning_content"):
+            raise ValueError(f"{row['sample_id']}: missing reasoning_content (run the builder with chain-of-thought)")
+        tasks.append(
+            {
+                "source": SOURCE_MEMORY,
+                "split": "validation" if row["group"] in val_groups else "train",
+                "group": row["group"],
+                "sample_id": row["sample_id"],
+                "mode": "assistant_only",
+                "messages": row["messages"],
+                "tools": row.get("tools"),
+            }
+        )
+    return tasks
 
 
 def _agent_group(row: dict[str, Any], index: int) -> str:
@@ -291,8 +318,9 @@ def _quantiles(values: list[int]) -> dict[str, int]:
 
 def build_cache(args: argparse.Namespace) -> None:
     tasks = (
-        _bill_tasks(args.bills_jsonl, args.validation_fraction, args.seed)
-        + _memory_tasks(args.memory_trace, args.validation_fraction, args.seed)
+        _doc_tasks([args.handbook, args.tutorial], args.docs_repeat)
+        + _message_tasks(args.bills_jsonl, args.validation_fraction, args.seed)
+        + _memory_tasks(args.memory_samples_jsonl, args.validation_fraction, args.seed)
         + _agent_tasks(args.agent_jsonl, args.validation_fraction, args.seed)
     )
     output_dir = args.output_dir
@@ -361,9 +389,15 @@ def build_cache(args: argparse.Namespace) -> None:
         ),
         "dropped": dropped,
         "summary": summary,
+        "docs_repeat": args.docs_repeat,
         "inputs": {
+            "handbook": {"path": str(args.handbook), "sha256": _sha256_file(args.handbook)},
+            "tutorial": {"path": str(args.tutorial), "sha256": _sha256_file(args.tutorial)},
             "bills_jsonl": {"path": str(args.bills_jsonl), "sha256": _sha256_file(args.bills_jsonl)},
-            "memory_trace": {"path": str(args.memory_trace), "sha256": _sha256_file(args.memory_trace)},
+            "memory_samples_jsonl": {
+                "path": str(args.memory_samples_jsonl),
+                "sha256": _sha256_file(args.memory_samples_jsonl),
+            },
             "agent_jsonl": {"path": str(args.agent_jsonl), "sha256": _sha256_file(args.agent_jsonl)},
         },
         "records": records,
@@ -433,8 +467,11 @@ class OdooCorpusDataset(Dataset):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bills-jsonl", type=Path, required=True)
-    parser.add_argument("--memory-trace", type=Path, required=True)
+    parser.add_argument("--handbook", type=Path, required=True, help="COMPANY-HANDBOOK.md")
+    parser.add_argument("--tutorial", type=Path, required=True, help="ODOO-MCP-TUTORIAL.md")
+    parser.add_argument("--docs-repeat", type=int, default=16, help="copies of each document per epoch")
+    parser.add_argument("--bills-jsonl", type=Path, required=True, help="offline export; only its chatter messages are used")
+    parser.add_argument("--memory-samples-jsonl", type=Path, required=True, help="output of build_memory_edit_samples.py")
     parser.add_argument("--agent-jsonl", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model-id", default="Qwen/Qwen3.8-Flash-Next")
