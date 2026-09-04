@@ -176,6 +176,11 @@ def _memory_tasks(path: Path, validation_fraction: float, seed: int) -> list[dic
 
 
 def _agent_group(row: dict[str, Any], index: int) -> str:
+    # Eval-world rows (build_eval_world_trajectories.py) carry the benchmark task id; it groups the
+    # validation split better than the bill id, and create-a-bill tasks have no "bill (id=N)" prompt.
+    task_id = (row.get("meta") or {}).get("task_id")
+    if task_id:
+        return str(task_id)
     for message in row.get("messages", []):
         if message.get("role") != "user":
             continue
