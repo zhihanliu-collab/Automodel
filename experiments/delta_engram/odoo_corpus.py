@@ -334,6 +334,7 @@ def _task_metadata(task: dict[str, Any]) -> dict[str, Any]:
         "group": task["group"],
         "sample_id": task["sample_id"],
         "masked_outdated_accounting_turns": int(task.get("masked_outdated_accounting_turns", 0)),
+        "masked_post_bill_tail_turns": int(task.get("masked_post_bill_tail_turns", 0)),
     }
 
 
@@ -416,6 +417,7 @@ def build_cache(args: argparse.Namespace) -> None:
         "masked_outdated_accounting_turns": sum(
             record["masked_outdated_accounting_turns"] for record in records
         ),
+        "masked_post_bill_tail_turns": sum(record.get("masked_post_bill_tail_turns", 0) for record in records),
         "dropped": dropped,
         "summary": summary,
         "docs_repeat": args.docs_repeat,
