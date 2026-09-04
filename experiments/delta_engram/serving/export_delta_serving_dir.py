@@ -51,6 +51,7 @@ DELTA_LAYER_MULTIPLIERS = (
 )
 READER_COPIED_FROM_BASE = ("norm_key", "norm_query", "norm_conv", "conv1d")
 DELTA_FILE = "delta_ple.safetensors"
+LORA_FILE = "delta_lora_merged.safetensors"  # merged W + scale*B@A tensors, fed last by the patched loader
 # safetensors header dtype strings -> torch dtypes
 _SAFETENSORS_DTYPES = {
     "BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32, "F64": torch.float64,
@@ -109,7 +110,9 @@ def sglang_layout(rows_per_head: int, ngram_heads: int, alignment: int):
     return tuple(sizes), tuple(offsets), padded
 
 
-def reassemble_delta(model_dir: str, delta_prefix: str) -> dict[str, torch.Tensor]:
+def reassemble_delta(model_dir: str, delta_prefix: str, match=None) -> dict[str, torch.Tensor]:
+    """Reassemble row-sharded DCP tensors whose key starts with ``delta_prefix`` (or satisfies ``match``)."""
+    match = match or (lambda key: key.startswith(delta_prefix))
     files = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
     if not files:
         sys.exit(f"no safetensors shards under {model_dir}")
@@ -119,7 +122,7 @@ def reassemble_delta(model_dir: str, delta_prefix: str) -> dict[str, torch.Tenso
             meta = handle.metadata() or {}
             info = json.loads(meta.get("DCP_SHARDING_INFO", "{}"))
             for key in handle.keys():
-                if not key.startswith(delta_prefix):
+                if not match(key):
                     continue
                 slice_ = handle.get_slice(key)
                 pieces[key].append(
@@ -185,9 +188,14 @@ def main() -> None:
                     help="Delta table kind the checkpoint was trained with")
     ap.add_argument("--keys", default=None, help="exact table: the delta_exact_keys_train.pt used in training")
     ap.add_argument("--alpha", type=float, default=1.0, help="delta_alpha the checkpoint was trained with")
+    ap.add_argument("--lora-dim", type=int, default=None,
+                    help="Delta+LoRA checkpoints: LoRA rank (peft.dim); with --lora-alpha merges W + alpha/dim * B@A")
+    ap.add_argument("--lora-alpha", type=float, default=None, help="peft.alpha of the checkpoint")
     args = ap.parse_args()
     if args.table == "exact" and not args.keys:
         ap.error("--table exact requires --keys")
+    if (args.lora_dim is None) != (args.lora_alpha is None):
+        ap.error("--lora-dim and --lora-alpha go together")
 
     base = os.path.realpath(args.base_snapshot)
     with open(os.path.join(base, "config.json")) as fh:
@@ -259,6 +267,44 @@ def main() -> None:
     }
     print("[stats]", json.dumps(stats, indent=1))
 
+    # Delta+LoRA checkpoints: merge every lora_A/lora_B pair into its base tensor. The result is
+    # written to LORA_FILE (kept out of the weight map so the default loader ignores it) and the
+    # patched sglang model feeds it last in load_weights (config.delta_lora_merged_path).
+    merged: dict[str, torch.Tensor] = {}
+    lora_stats: dict = {}
+    if args.lora_dim is not None:
+        lora = reassemble_delta(args.ckpt_model_dir, "", match=lambda k: ".lora_A." in k or ".lora_B." in k)
+        scale = float(args.lora_alpha) / float(args.lora_dim)
+        modules = sorted({k.rsplit(".lora_", 1)[0] for k in lora})
+        changes = []
+        for module in modules:
+            a_key, b_key = f"{module}.lora_A.weight", f"{module}.lora_B.weight"
+            if a_key not in lora or b_key not in lora:
+                sys.exit(f"incomplete LoRA pair for {module}: have {[k for k in lora if k.startswith(module)]}")
+            a, b = lora[a_key].float(), lora[b_key].float()
+            if a.shape[0] != args.lora_dim or b.shape[1] != args.lora_dim:
+                sys.exit(f"{module}: lora shapes A{tuple(a.shape)} B{tuple(b.shape)} do not match --lora-dim {args.lora_dim}")
+            # nemo module FQN -> HF key (the MoE adapter renames shared_experts -> shared_expert).
+            candidates = [f"{module}.weight", f"{module}.weight".replace(".shared_experts.", ".shared_expert.")]
+            hf_key = next((c for c in candidates if c in weight_map), None)
+            if hf_key is None:
+                sys.exit(f"{module}: no base tensor for any of {candidates}")
+            w = load_base_tensor(base, weight_map, hf_key)
+            update = scale * (b @ a)
+            if tuple(update.shape) != tuple(w.shape):
+                sys.exit(f"{hf_key}: LoRA update {tuple(update.shape)} vs base {tuple(w.shape)}")
+            new = (w.float() + update).to(w.dtype).contiguous()
+            merged[hf_key] = new
+            changes.append(rel_change(new, w))
+        lora_stats = {
+            "modules": len(modules), "scale": scale, "dim": args.lora_dim, "alpha": args.lora_alpha,
+            "rel_change_mean": float(sum(changes) / max(len(changes), 1)),
+            "rel_change_max": float(max(changes)) if changes else 0.0,
+            "lora_parameters": int(sum(t.numel() for t in lora.values())),
+            "merged_bytes": int(sum(t.numel() * t.element_size() for t in merged.values())),
+        }
+        print("[lora]", json.dumps(lora_stats, indent=1))
+
     os.makedirs(args.out, exist_ok=True)
     for entry in sorted(os.listdir(base)):
         if entry in ("config.json", "model.safetensors.index.json"):
@@ -277,10 +323,14 @@ def main() -> None:
         text["delta_exact_keys_path"] = keys_dst
     else:
         text["delta_ngram_vocab_size_per_head"] = int(args.rows_per_head)
+    if merged:
+        text["delta_lora_merged_path"] = os.path.join(args.out, LORA_FILE)
     with open(os.path.join(args.out, "config.json"), "w") as fh:
         json.dump(config, fh, indent=2)
 
     save_file(out_tensors, os.path.join(args.out, DELTA_FILE), metadata={"format": "pt"})
+    if merged:
+        save_file(merged, os.path.join(args.out, LORA_FILE), metadata={"format": "pt"})
     delta_bytes = sum(t.numel() * t.element_size() for t in out_tensors.values())
     for key in out_tensors:
         if key in weight_map:
@@ -298,6 +348,7 @@ def main() -> None:
         commit = "unknown"
     manifest = {
         "ckpt_model_dir": os.path.realpath(args.ckpt_model_dir),
+        "lora": lora_stats,
         "base_snapshot": base,
         "delta_layer": layer,
         "table": args.table,

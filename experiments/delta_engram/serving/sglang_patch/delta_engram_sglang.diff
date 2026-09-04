@@ -1,6 +1,6 @@
 --- upstream_configs_qwen4_exp.py	2026-09-03 11:54:56.411093695 -0700
-+++ configs_qwen4_exp.py	2026-09-03 18:22:22.294535786 -0700
-@@ -30,6 +30,14 @@
++++ configs_qwen4_exp.py	2026-09-03 19:46:58.255754665 -0700
+@@ -30,6 +30,15 @@
          make_ngram_vocab_size_divisible_by=128,
          ple_offload_embedding=False,
          ple_embedding_dtype=None,
@@ -12,10 +12,11 @@
 +        delta_exact_keys_path=None,
 +        delta_alpha=1.0,
 +        delta_ratio_clip=None,
++        delta_lora_merged_path=None,
          index_share_for_mtp_iteration=True,
          rope_parameters=None,
          layer_types=None,
-@@ -72,6 +80,30 @@
+@@ -72,6 +81,34 @@
          self.ple_offload_embedding = ple_offload_embedding
          # "float8_e4m3fn" keeps fp8 PLE tables fp8-resident; text_config-scoped.
          self.ple_embedding_dtype = ple_embedding_dtype
@@ -43,10 +44,14 @@
 +        # Per-token cap on ||alpha*Delta_t|| / ||H_t||: tokens above the cap are
 +        # rescaled down to it (None = no cap). Probe knob for the heavy r_t tail.
 +        self.delta_ratio_clip = None if delta_ratio_clip is None else float(delta_ratio_clip)
++        # Delta+LoRA checkpoints: safetensors file with the LoRA update already merged into the
++        # touched base tensors (W + scale * B @ A). Served by feeding these tensors LAST in
++        # load_weights, so they override the base copies without rewriting the 336GB of shards.
++        self.delta_lora_merged_path = delta_lora_merged_path
          # MTP draft decode steps reuse the draft-extend indexer selection
          # (GLM-5.2 IndexShare); default on for Qwen4-Exp, checkpoint config
          # or --json-model-override-args can disable it.
-@@ -87,11 +119,37 @@
+@@ -87,11 +124,37 @@
          return super().layers_block_type
  
      @property
@@ -86,7 +91,7 @@
      def short_conv_state_shape(self):
          if not self.short_conv_layer_ids:
 --- upstream_models_qwen4_exp.py	2026-09-03 11:54:56.402092794 -0700
-+++ models_qwen4_exp.py	2026-09-03 18:22:22.302536587 -0700
++++ models_qwen4_exp.py	2026-09-03 19:46:58.262755366 -0700
 @@ -432,10 +432,25 @@
          embedding_dim: int,
          ple_layer_index: int = 0,
@@ -449,7 +454,7 @@
              return False
          buffer_name = name.rsplit(".", 1)[-1]
          if buffer_name.startswith("hashstats_"):
-@@ -1772,6 +1994,17 @@
+@@ -1772,11 +1994,48 @@
                  f"Shape mismatch for {name}: expected {tuple(buffer.shape)}, "
                  f"got {tuple(loaded_weight.shape)}"
              )
@@ -467,7 +472,38 @@
          buffer.copy_(loaded_weight.to(device=buffer.device, dtype=buffer.dtype))
          loaded_buffers.add(name)
          return True
-@@ -1969,9 +2202,10 @@
+ 
++    @staticmethod
++    def _with_lora_merged_overrides(weights: Iterable[Tuple[str, torch.Tensor]], path: str):
++        """Drop the base copies of every tensor present in ``path`` and yield the merged
++        tensors last, so Delta+LoRA exports override attention / GDN / shared-expert weights
++        through the normal stacked-param loaders (TP sharding included)."""
++        from safetensors import safe_open
++
++        with safe_open(path, framework="pt") as handle:
++            override_names = set(handle.keys())
++        skipped = 0
++        for name, tensor in weights:
++            if name in override_names:
++                skipped += 1
++                continue
++            yield name, tensor
++        with safe_open(path, framework="pt") as handle:
++            for name in sorted(override_names):
++                yield name, handle.get_tensor(name)
++        logger.info(
++            "delta_lora_merged: skipped %d base tensors, loaded %d merged tensors from %s",
++            skipped, len(override_names), path,
++        )
++
+     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
++        merged_path = getattr(self.config, "delta_lora_merged_path", None)
++        if merged_path:
++            weights = self._with_lora_merged_overrides(weights, merged_path)
+         stacked_params_mapping = [
+             ("qkv_proj", "q_proj", "q"),
+             ("qkv_proj", "k_proj", "k"),
+@@ -1969,9 +2228,10 @@
                  continue
              if load_qwen4_exp_ple_shard(name, loaded_weight):
                  continue

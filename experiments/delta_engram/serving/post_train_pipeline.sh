@@ -1,6 +1,7 @@
 #!/bin/bash
 # Checkpoint -> servable dir -> endpoints -> probes, end to end, on the Nebius cluster.
 # Usage: [PARTITION=b200|h200] [EXPORT_NODE=b200-2] post_train_pipeline.sh <ckpt-model-dir> <tag> <table: exact|hashed> <alpha> <keys.pt|-> <node-a> <node-b>
+#   LORA_DIM/LORA_ALPHA: set for Delta+LoRA checkpoints (merged into the export, see export_delta_serving_dir.py).
 #   PARTITION: partition of the serving nodes (default b200). The export runs as a CPU step in the
 #   training container (lf-gdn-smoke, repo at /workspace) on EXPORT_NODE (default b200-2).
 #   e.g. post_train_pipeline.sh /mnt/data/zhihan/delta-engram/checkpoints/odoo-delta-v2/epoch_0_step_339/model v2s339 exact 0.25 \
@@ -21,6 +22,8 @@ mkdir -p "$SV/logs"
 if [[ ! -f "$OUT/SERVING_MANIFEST.json" ]]; then
   echo "[$(date -u +%FT%TZ)] export $CKPT -> $OUT"
   KEY_ARGS=(); [[ "$TABLE" == "exact" ]] && KEY_ARGS=(--keys "$KEYS")
+  # Delta+LoRA checkpoints: LORA_DIM/LORA_ALPHA (peft.dim / peft.alpha of the run) merge the adapters.
+  [[ -n "${LORA_DIM:-}" ]] && KEY_ARGS+=(--lora-dim "$LORA_DIM" --lora-alpha "${LORA_ALPHA:?LORA_ALPHA}")
   # The training container is usually already running on the node (attach ignores new
   # mounts), and it carries the repo at /workspace, torch and safetensors.
   srun -p b200 -w "$EXPORT_NODE" --ntasks=1 --cpus-per-task=8 --mem=64G --time=01:00:00 --job-name="export-$TAG" \

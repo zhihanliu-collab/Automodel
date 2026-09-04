@@ -37,3 +37,14 @@ sbatch -w b200-4 experiments/delta_engram/serving/serve_delta.sbatch s329 30000 
 ```
 
 Served model name: `Qwen/Qwen3.8-Flash-Next-Delta-<tag>`.
+
+## Delta+LoRA checkpoints (odoo-delta-v2-lora)
+
+`export_delta_serving_dir.py --lora-dim 64 --lora-alpha 128 ...` reassembles the `lora_A`/`lora_B`
+DCP shards, merges `W + alpha/dim * B@A` into the touched base tensors (GDN in/out projections,
+full-attention q/k/v/o, shared-expert MLP; HF name `shared_expert`), and writes them to
+`delta_lora_merged.safetensors`. That file is deliberately absent from `model.safetensors.index.json`;
+`config.json` carries `delta_lora_merged_path` and the patched `Qwen4ExpForConditionalGeneration.load_weights`
+drops the base copies of those names from the weight stream and yields the merged tensors last, so the
+existing stacked-param loaders (qkv_proj, gate_up_proj, in_proj_qkvz/ba, TP sharding) apply unchanged.
+sglang itself has no LoRA support for this architecture. `post_train_pipeline.sh` takes `LORA_DIM`/`LORA_ALPHA`.

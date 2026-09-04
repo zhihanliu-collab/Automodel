@@ -38,6 +38,7 @@ class Qwen4ExpTextConfig(Qwen3NextConfig):
         delta_exact_keys_path=None,
         delta_alpha=1.0,
         delta_ratio_clip=None,
+        delta_lora_merged_path=None,
         index_share_for_mtp_iteration=True,
         rope_parameters=None,
         layer_types=None,
@@ -104,6 +105,10 @@ class Qwen4ExpTextConfig(Qwen3NextConfig):
         # Per-token cap on ||alpha*Delta_t|| / ||H_t||: tokens above the cap are
         # rescaled down to it (None = no cap). Probe knob for the heavy r_t tail.
         self.delta_ratio_clip = None if delta_ratio_clip is None else float(delta_ratio_clip)
+        # Delta+LoRA checkpoints: safetensors file with the LoRA update already merged into the
+        # touched base tensors (W + scale * B @ A). Served by feeding these tensors LAST in
+        # load_weights, so they override the base copies without rewriting the 336GB of shards.
+        self.delta_lora_merged_path = delta_lora_merged_path
         # MTP draft decode steps reuse the draft-extend indexer selection
         # (GLM-5.2 IndexShare); default on for Qwen4-Exp, checkpoint config
         # or --json-model-override-args can disable it.

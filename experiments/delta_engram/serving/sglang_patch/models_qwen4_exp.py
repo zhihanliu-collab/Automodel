@@ -2009,7 +2009,33 @@ class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
         loaded_buffers.add(name)
         return True
 
+    @staticmethod
+    def _with_lora_merged_overrides(weights: Iterable[Tuple[str, torch.Tensor]], path: str):
+        """Drop the base copies of every tensor present in ``path`` and yield the merged
+        tensors last, so Delta+LoRA exports override attention / GDN / shared-expert weights
+        through the normal stacked-param loaders (TP sharding included)."""
+        from safetensors import safe_open
+
+        with safe_open(path, framework="pt") as handle:
+            override_names = set(handle.keys())
+        skipped = 0
+        for name, tensor in weights:
+            if name in override_names:
+                skipped += 1
+                continue
+            yield name, tensor
+        with safe_open(path, framework="pt") as handle:
+            for name in sorted(override_names):
+                yield name, handle.get_tensor(name)
+        logger.info(
+            "delta_lora_merged: skipped %d base tensors, loaded %d merged tensors from %s",
+            skipped, len(override_names), path,
+        )
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        merged_path = getattr(self.config, "delta_lora_merged_path", None)
+        if merged_path:
+            weights = self._with_lora_merged_overrides(weights, merged_path)
         stacked_params_mapping = [
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
