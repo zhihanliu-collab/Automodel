@@ -112,8 +112,8 @@ class Qwen3_8_FlashNextTextConfig(PretrainedConfig):
             raise ValueError(f"delta_engram_table must be 'hashed' or 'exact', got {delta_engram_table!r}")
         if delta_engram_table == "exact" and delta_engram_enabled and not delta_exact_keys_path:
             raise ValueError("delta_engram_table='exact' requires delta_exact_keys_path")
-        if not (delta_alpha > 0):
-            raise ValueError(f"delta_alpha must be positive, got {delta_alpha}")
+        if not (delta_alpha >= 0):
+            raise ValueError(f"delta_alpha must be non-negative (0 = Delta branch built but inert, for controls), got {delta_alpha}")
         if delta_ratio_clip is not None and not (delta_ratio_clip > 0):
             raise ValueError(f"delta_ratio_clip must be positive or None, got {delta_ratio_clip}")
 
