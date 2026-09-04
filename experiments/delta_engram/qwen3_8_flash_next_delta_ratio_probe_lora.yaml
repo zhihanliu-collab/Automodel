@@ -1,29 +1,23 @@
-# Delta-Engram v2 + LoRA: the v2 exact-table Delta (layer 1) trained jointly with a
-# LoRA on every downstream projection (GDN in/out projections, full-attention
-# q/k/v/o, shared-expert MLP; routed experts untouched so the merged export stays
-# small). Motivation (2026-09-04): four Delta-only variants (s164/s329/s339/s675,
-# with alpha and r<=1 clipping) all lost the same 4 base-pass tasks -- the Delta
-# injection changes downstream behaviour (skipped vendor chatter / approvals) and
-# nothing downstream could adapt. LoRA gives the 47 layers above the injection a
-# trainable path. Same corpus, schedule, gate and validation buckets as v2.
-# Control arm: DELTA_ENABLED=false (LoRA only, no Delta) on the same config.
-# Corpus cache v3 = v2 sources with the trajectory export replaced by jian's v3-derived file
-# (v1 export had 36% empty-think assistant turns and no multi-tool-call turns; thread af0fa15a).
+# Ratio probe for Delta+LoRA checkpoints: same as the Delta-only probe yaml plus the r=8 LoRA
+# modules so the trainable-only DCP restore finds every lora_A/lora_B tensor.
+# Restore-only probe: per-token Delta/hidden norm ratio by text family (see delta_ratio_probe.py).
+# CP1 x EP16 on 32 ranks; no optimizer step; W&B off. Launch via nebius_delta_v2.sbatch with
+# CONFIG_PATH=this file, RESTORE_FROM=<ckpt>, MAX_STEPS=1, LR_WARMUP_STEPS=0.
 
-recipe: experiments.delta_engram.training_diagnostics.DeltaDiagnosticsTrainingRecipe
+recipe: experiments.delta_engram.delta_ratio_probe.DeltaRatioProbeRecipe
 
 seed: 1234
 
 step_scheduler:
   # 32 GPUs = DP4 x CP8. One sample spans each 8-rank CP group.
-  global_batch_size: 4
+  global_batch_size: 32
   local_batch_size: 1
   ckpt_every_steps: 170
   save_checkpoint_every_epoch: false
   val_every_steps: 170
   gc_every_steps: 10
-  num_epochs: 2
-  max_steps: 680
+  num_epochs: 1
+  max_steps: 1
 
 dist_env:
   backend: nccl
@@ -38,7 +32,7 @@ model:
     language_model_only: true
     delta_engram_enabled: true
     delta_engram_table: exact
-    delta_exact_keys_path: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v3/delta_exact_keys_train.pt
+    delta_exact_keys_path: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2/delta_exact_keys_train.pt
     # LoRA-style fixed scale on the Delta branch (hidden += alpha * delta_ple(x)).
     delta_alpha: 0.25
   trust_remote_code: false
@@ -60,10 +54,9 @@ model:
     enable_fsdp_optimizations: true
 
 checkpoint:
-  enabled: true
-  # Explicit: save Delta+LoRA as trainable-only DCP (FQN keys), not the HF PEFT adapter path.
   is_peft: false
-  checkpoint_dir: /mnt/data/zhihan/delta-engram/checkpoints/odoo-delta-v2-lora
+  enabled: true
+  checkpoint_dir: /mnt/data/zhihan/delta-engram/checkpoints/ratio-probe-scratch
   best_metric_key: agent_trajectories
   model_save_format: safetensors
   save_consolidated: false
@@ -72,19 +65,15 @@ checkpoint:
 distributed:
   strategy: fsdp2
   tp_size: 1
-  cp_size: 8
+  cp_size: 1
   pp_size: 1
   ep_size: 16
   sequence_parallel: false
-  activation_checkpointing: true
+  activation_checkpointing: false
   moe:
     reshard_after_forward: true
     wrap_outer_model: true
 
-# LoRA on everything downstream of the layer-1 Delta injection except the routed
-# experts (512/layer; merging them would rewrite the whole 336GB export) and the
-# QSA indexer (its q/k projection feeds the sparse-attention selection, not the
-# hidden state). Wildcards match the nemo module FQNs.
 peft:
   _target_: nemo_automodel.components._peft.lora.PeftConfig
   target_modules:
@@ -121,7 +110,7 @@ loss_fn:
 
 dataset:
   _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
-  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v3
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
   split: train
 
 packed_sequence:
@@ -144,25 +133,25 @@ dataloader:
 # every validation.
 validation_dataset_offline_docs:
   _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
-  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v3
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
   split: train
   sources: [offline_docs]
 
 validation_dataset_offline_messages:
   _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
-  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v3
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
   split: validation
   sources: [offline_messages]
 
 validation_dataset_memory_edits:
   _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
-  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v3
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
   split: validation
   sources: [memory_edits]
 
 validation_dataset_agent_trajectories:
   _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
-  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v3
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
   split: validation
   sources: [agent_trajectories]
 
@@ -197,14 +186,10 @@ optimizer:
     - pattern: '\.delta_ple\.ple_embedding\.ngram_embedding\.weight$'
       lr_mult: 10.0
       wd_mult: 0.0
-    # LoRA adapters train at the usual LoRA rate (~1e-4 = 33 x the 3e-6 Delta K/V rate).
-    - pattern: '\.lora_[AB]\.weight$'
-      lr_mult: 33.0
-      wd_mult: 0.0
 
 lr_scheduler:
-  lr_warmup_steps: 13
-  lr_decay_steps: 680
+  lr_warmup_steps: 1
+  lr_decay_steps: 2
   lr_decay_style: cosine
   min_lr: 3.0e-7
 
@@ -212,9 +197,9 @@ clip_grad_norm:
   max_norm: 1.0
 
 wandb:
-  enable: true
+  enable: false
   project: ${oc.env:WANDB_PROJECT,delta-engram}
-  name: ${oc.env:WANDB_NAME,qwen38-odoo-delta-v2-lora}
-  group: ${oc.env:WANDB_GROUP,odoo-delta-v2-lora}
-  tags: [qwen3.8-flash-next, delta-engram, exact-table, alpha, lora, odoo-v2, 131k, fsdp2, ep16, cp8, dp4]
+  name: ${oc.env:WANDB_NAME,qwen38-odoo-delta-v2}
+  group: ${oc.env:WANDB_GROUP,odoo-delta-v2}
+  tags: [qwen3.8-flash-next, delta-engram, exact-table, alpha, odoo-v2, 131k, fsdp2, ep16, cp8, dp4]
   dir: ${oc.env:WANDB_DIR,/mnt/data/zhihan/delta-engram/wandb}

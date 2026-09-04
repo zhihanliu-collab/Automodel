@@ -648,12 +648,15 @@ class RecipeConfig:
         kwargs = _as_dict(node) if node is not None else {}
         kwargs.pop("restore_from", None)  # consumed separately at load time, not a config field
         model = self._raw.get("model", None)
-        # Model-derived values; YAML overrides win if explicitly set.
-        kwargs |= {
+        # Model-derived values; YAML overrides win if explicitly set (an explicit
+        # ``checkpoint.is_peft: false`` keeps a LoRA run on the plain trainable-only path).
+        derived = {
             "model_repo_id": _model_name_from_cfg(model) if model is not None else None,
             "model_cache_dir": self._raw.get("model.cache_dir", None),
             "is_peft": bool(self._raw.get("peft", None)),
         }
+        for key, value in derived.items():
+            kwargs.setdefault(key, value)
         return CheckpointingConfig(**kwargs)
 
     # everything else delegates to the raw ConfigNode
