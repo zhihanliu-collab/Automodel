@@ -60,6 +60,8 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
 
     def setup(self) -> None:
         super().setup()
+        self._checkpoint_lora_like_delta()
+        self._check_trainable_order_across_ranks()
         model = self.model_parts[0]
         language_model = model.model.language_model
         ple_layer_index = str(int(model.config.text_config.ple_layer_ids[0]) - 1)
@@ -110,6 +112,47 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             self._diag_table_module.register_forward_pre_hook(self._capture_step0_touched_rows),
             self._diag_table_module.weight.register_hook(self._capture_step0_row_grads),
         ]
+
+    def _checkpoint_lora_like_delta(self) -> None:
+        """Save Delta+LoRA runs the way the Delta-only v2 run saved (trainable-only DCP with FQN keys).
+
+        With a ``peft:`` section the framework marks the checkpoint ``is_peft`` and, under expert
+        parallelism, switches the optimizer state to the native ``optimizer.state_dict()`` whose
+        entries are keyed by *position* in the param groups. Job 5068 (2026-09-04) died at the
+        first save with DCP "Failed to validate global plan": the same position held a different
+        LoRA tensor on ranks 24-31 than on the other ranks. The FQN-keyed path used by the v2 run
+        (is_peft=False, checkpoint.trainable_only=True) does not depend on parameter order, and the
+        export merges lora_A/lora_B from those DCP shards directly, so the HF PEFT adapter layout
+        is not needed. DELTA_CKPT_KEEP_PEFT=1 keeps the framework default.
+        """
+        if os.environ.get("DELTA_CKPT_KEEP_PEFT", "0") == "1" or self.peft_config is None:
+            return
+        config = self.checkpointer.config
+        if getattr(config, "is_peft", False):
+            config.is_peft = False
+            if dist.get_rank() == 0:
+                print("[DIAG] checkpoint.is_peft forced False: Delta+LoRA saved as trainable-only DCP (FQN keys)", flush=True)
+
+    def _check_trainable_order_across_ranks(self) -> None:
+        """Log whether every rank sees the same trainable-parameter FQN sequence (order and set)."""
+        import hashlib
+
+        names = [name for name, param in self.model_parts[0].named_parameters() if param.requires_grad]
+        digest = hashlib.sha1("\n".join(names).encode()).hexdigest()[:12]
+        gathered: list[tuple[str, int, list[str]]] = [None] * dist.get_world_size()  # type: ignore[list-item]
+        dist.all_gather_object(gathered, (digest, len(names), names if dist.get_rank() % 8 == 0 else []))
+        if dist.get_rank() != 0:
+            return
+        digests = sorted({d for d, _, _ in gathered})
+        print(f"[DIAG] trainable params per rank: n={len(names)} order_digests={digests}", flush=True)
+        if len(digests) > 1:
+            reference = gathered[0][2]
+            for rank, (d, n, other) in enumerate(gathered):
+                if d == gathered[0][0] or not other:
+                    continue
+                first = next((i for i, (a, b) in enumerate(zip(reference, other)) if a != b), min(len(reference), len(other)))
+                print(f"[DIAG] rank {rank} trainable order differs from rank 0 at index {first}: "
+                      f"rank0={reference[first] if first < len(reference) else None} rank{rank}={other[first] if first < len(other) else None} (n={n} vs {len(reference)})", flush=True)
 
     def _forward_backward_step(
         self,
