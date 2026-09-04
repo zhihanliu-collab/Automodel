@@ -10,7 +10,10 @@ set -euo pipefail
 SRC="${1:?src serving tag}"; JOB="${2:?sandbox jobid}"; NODE="${3:?node}"; PORT="${4:?port}"; CNAME="${5:?container suffix}"; shift 5
 ALPHAS=("$@"); [ ${#ALPHAS[@]} -gt 0 ] || { echo "need alphas"; exit 2; }
 REPO=/home/zhihan/delta-engram-automodel; SV=/mnt/data/zhihan/delta-engram/serving
-LAUNCH=$HOME/reduce100-launchers/pipeline_runs/nebius_cpu_sandbox
+# Private worktrees (branch zhihan/delta-engram-eval; harness pinned) -- the shared checkouts are
+# edited by other sessions while chains run. Override with LAUNCH_DIR / SRC_DIR.
+LAUNCH="${LAUNCH_DIR:-$HOME/reduce100-launchers-delta/pipeline_runs/nebius_cpu_sandbox}"
+export SRC_DIR="${SRC_DIR:-$HOME/research-reviewer-agent-delta/src/odoo-baselines}"
 LIST=/mnt/data/zhihan/reviewer_reduce100/lists/eval20.txt; RUNS=/mnt/data/zhihan/reviewer_reduce100/runs
 WORKERS="${WORKERS:-10}"; PARTITION="${PARTITION:-h200}"
 # ARM_SUFFIX distinguishes repeat runs of the same alpha (e.g. r2); NLL_PROBE_BASE=host:port of a base
