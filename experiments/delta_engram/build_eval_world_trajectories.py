@@ -281,7 +281,10 @@ def _session_rows(args: argparse.Namespace, eligible: set[str], forbidden: set[s
                     continue
                 passed, task_id, prompt = graded
                 if task_id in forbidden:
-                    raise SystemExit(f"eval firewall: {task_dir} is eval task {task_id}; refusing to build")
+                    # Full reduce100 runs legitimately contain eval20 tasks: skip them (the wire arms are
+                    # syn80-only, so there a hit is a bug and aborts).
+                    skipped["eval20_skipped"] += 1
+                    continue
                 if task_id not in eligible or not passed:
                     skipped["ineligible_or_failed"] += 1
                     continue
