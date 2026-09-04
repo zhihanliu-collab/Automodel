@@ -33,7 +33,7 @@ CODE_ROOT=/home/zhihan/delta-engram-automodel
 DATA_ROOT=/mnt/data/zhihan/delta-engram
 : "${CHECKPOINT_TAG:?set CHECKPOINT_TAG}"
 export CONFIG_PATH="${CONFIG_PATH:-experiments/delta_engram/qwen3_8_flash_next_odoo_delta_v2.yaml}"
-export CHECKPOINT_TAG MAX_STEPS NUM_EPOCHS VAL_EVERY_STEPS CKPT_EVERY_STEPS LR_WARMUP_STEPS DELTA_ALPHA KEYS_PATH RESTORE_FROM FREEZE_CONFIG DELTA_ENABLED
+export CHECKPOINT_TAG MAX_STEPS NUM_EPOCHS VAL_EVERY_STEPS CKPT_EVERY_STEPS LR_WARMUP_STEPS DELTA_ALPHA KEYS_PATH RESTORE_FROM FREEZE_CONFIG DELTA_ENABLED GPUS_PER_NODE CPUS_PER_TASK MEM
 export DELTA_GATE_TOLERANCE="${DELTA_GATE_TOLERANCE:-0.03}"
 export DELTA_GATE_MIN_STEP="${DELTA_GATE_MIN_STEP:-100}"
 export DELTA_GATE_VAL_NAME="${DELTA_GATE_VAL_NAME:-offline_docs}"
@@ -63,7 +63,7 @@ for NODE_RANK in "${!NODES[@]}"; do
   esac
   echo "[$(date -u +%FT%TZ)] launch node=$NODE rank=$NODE_RANK container=$CONTAINER_NAME"
   srun --label --nodes=1 --ntasks=1 --nodelist="$NODE" \
-    --gpus-per-node=8 --cpus-per-task=32 --mem=1000G \
+    --gpus-per-node="${GPUS_PER_NODE:-8}" --cpus-per-task="${CPUS_PER_TASK:-32}" --mem="${MEM:-1000G}" \
     --container-name="$CONTAINER_NAME" \
     --container-mounts="$CODE_ROOT:/workspace,/mnt/data:/mnt/data" \
     --container-workdir=/workspace \

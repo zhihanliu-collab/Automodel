@@ -7,7 +7,7 @@ NODE_RANK="${1:?node rank}"
 MASTER_ADDR="${2:?master address}"
 MASTER_PORT="${3:?master port}"
 NNODES="${4:?node count}"
-GPUS_PER_NODE=8
+GPUS_PER_NODE="${GPUS_PER_NODE:-8}"   # 4 when the nodes are half-occupied (4 nodes x 4 GPUs = the 16-GPU DP2xCP8 layout)
 RUN_ROOT=/mnt/data/zhihan/delta-engram
 CHECKPOINT_DIR="$RUN_ROOT/checkpoints/${CHECKPOINT_TAG:?CHECKPOINT_TAG}"
 LOCAL_CACHE_ROOT="/tmp/zhihan/delta-engram-${SLURM_JOB_ID}"
