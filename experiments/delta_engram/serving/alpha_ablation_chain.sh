@@ -13,6 +13,9 @@ REPO=/home/zhihan/delta-engram-automodel; SV=/mnt/data/zhihan/delta-engram/servi
 LAUNCH=$HOME/reduce100-launchers/pipeline_runs/nebius_cpu_sandbox
 LIST=/mnt/data/zhihan/reviewer_reduce100/lists/eval20.txt; RUNS=/mnt/data/zhihan/reviewer_reduce100/runs
 WORKERS="${WORKERS:-10}"; PARTITION="${PARTITION:-h200}"
+# ARM_SUFFIX distinguishes repeat runs of the same alpha (e.g. r2); NLL_PROBE_BASE=host:port of a base
+# endpoint runs nll_probe.py against each alpha endpoint once it is up (log: serving/logs/nll-<tag>.log).
+ARM_SUFFIX="${ARM_SUFFIX:-}"; NLL_PROBE_BASE="${NLL_PROBE_BASE:-}"
 log() { echo "[$(date -u +%FT%TZ)] $*"; }
 graded() { python3 - "$RUNS" "$1" <<'PY'
 import glob, json, sys
@@ -24,7 +27,7 @@ print(",".join(sorted(ids)))
 PY
 }
 for A in "${ALPHAS[@]}"; do
-  ATAG="a$(echo "$A" | sed 's/^0\.//; s/\.//g')"; TAG="${SRC}_${ATAG}"; ARM="dvsd_${ATAG}e20"
+  ATAG="a$(echo "$A" | sed 's/^0\.//; s/\.//g')"; TAG="${SRC}_${ATAG}"; ARM="dvsd_${ATAG}e20${ARM_SUFFIX}"
   log "=== alpha=$A tag=$TAG arm=${ARM}_base"
   [ -f "$SV/$TAG/SERVING_MANIFEST.json" ] || python3 "$REPO/experiments/delta_engram/serving/make_variant_dir.py" --src "$SV/$SRC" --dst "$SV/$TAG" --set "delta_alpha=$A"
   python3 -c "import json,sys; c=json.load(open('$SV/$TAG/config.json'))['text_config']; assert abs(c['delta_alpha']-$A)<1e-12, c['delta_alpha']; print('config delta_alpha', c['delta_alpha'])"
@@ -37,6 +40,10 @@ for A in "${ALPHAS[@]}"; do
   done
   curl -sf -m 5 "http://$NODE:$PORT/v1/models" | grep -q "Delta-$TAG" || { log "endpoint never came up for $TAG; skipping alpha $A"; scancel "$SJOB" 2>/dev/null || true; continue; }
   log "endpoint up: $(curl -sf -m 5 http://$NODE:$PORT/v1/models | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"][0]["id"])')"
+  if [ -n "$NLL_PROBE_BASE" ]; then
+    srun --jobid="$JOB" --overlap --ntasks=1 --cpus-per-task=1 python3 "$REPO/experiments/delta_engram/serving/nll_probe.py" \
+      --base "$NLL_PROBE_BASE" --delta "$TAG=$NODE:$PORT" 2>&1 | grep -v cpu-bind | tee "$SV/logs/nll-$TAG.log" | tail -6 || true
+  fi
   export DELTA_MODEL="Qwen/Qwen3.8-Flash-Next-Delta-$TAG"
   bash "$LAUNCH/add_arms_overlap.sh" "$JOB" "${ARM}_base:$LIST:$WORKERS::$NODE:$PORT"
   sleep 120; while squeue -s -h -j "$JOB" -o %j | grep -q "rr100_${ARM}_"; do sleep 60; done
