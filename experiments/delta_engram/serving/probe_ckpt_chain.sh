@@ -6,6 +6,7 @@
 #          v2lora_r8_s169 0.25 /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v3/delta_exact_keys_train.pt h200-1 30000 tp4 h200-1:30001 8 16
 # Env: SANDBOX_JOB (default: my rr100_all job on b200-5), EXPORT_NODE (b200-2), WORKERS (10), PARTITION (h200),
 #      ARM (default dvsd_<tag>e20; must match a repair_reduce100.sh case: dvsd_* uses DELTA_MODEL).
+#      NO_DELTA=1 for LoRA-only control checkpoints (export --no-delta: base + merged LoRA, Delta branch off).
 set -euo pipefail
 CKPT="${1:?ckpt model dir}"; TAG="${2:?tag}"; ALPHA="${3:?alpha}"; KEYS="${4:?keys.pt}"; NODE="${5:?node}"; PORT="${6:?port}"
 CNAME="${7:?container suffix}"; BASE_EP="${8:?base host:port}"; LORA_DIM="${9:-}"; LORA_ALPHA="${10:-}"
@@ -30,6 +31,7 @@ PY
 log "ckpt=$CKPT tag=$TAG alpha=$ALPHA lora=${LORA_DIM:-none}/${LORA_ALPHA:-} node=$NODE:$PORT sandbox_job=$JOB arm=${ARM}_base"
 if [ ! -f "$OUT/SERVING_MANIFEST.json" ]; then
   LORA_ARGS=(); [ -n "$LORA_DIM" ] && LORA_ARGS=(--lora-dim "$LORA_DIM" --lora-alpha "$LORA_ALPHA")
+  [ "${NO_DELTA:-0}" = "1" ] && LORA_ARGS+=(--no-delta)   # LoRA-only control checkpoints (no Delta tensors)
   srun -p b200 -w "$EXPORT_NODE" --overlap --ntasks=1 --cpus-per-task=8 --mem=64G --time=01:00:00 --job-name="export-$TAG" \
     --container-name=lf-gdn-smoke --container-mounts=/mnt/data:/mnt/data,$REPO:/workspace \
     bash -lc "export PYTHONNOUSERSITE=1; python /workspace/experiments/delta_engram/serving/export_delta_serving_dir.py \
