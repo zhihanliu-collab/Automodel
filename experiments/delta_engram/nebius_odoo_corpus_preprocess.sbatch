@@ -27,6 +27,7 @@ WORKERS="${2:-32}"
 DOCS_REPEAT="${3:-16}"
 AGENT_JSONL="${4:-/mnt/data/jian/datasets/ccsdk_flashnext/ccsdk960_v3_flashnext_131k.jsonl}"
 AGENT_MD5_EXPECTED="${AGENT_MD5_EXPECTED:-c022fcc3956f1d09df9b51f38ac49901}"
+AGENT_LIMIT="${AGENT_LIMIT:-}"; AGENT_LIMIT_ARGS=""; [ -n "$AGENT_LIMIT" ] && AGENT_LIMIT_ARGS="--agent-limit $AGENT_LIMIT"
 EXTRA_DOCS="${EXTRA_DOCS:-}"   # space-separated extra reference docs (v5: the Company Notices channel)
 EXTRA_DOC_ARGS=""; for d in $EXTRA_DOCS; do EXTRA_DOC_ARGS="$EXTRA_DOC_ARGS --extra-doc $d"; done
 
@@ -49,7 +50,7 @@ srun --nodes=1 --ntasks=1 --cpus-per-task=64 --mem=512G \
         --docs-repeat $DOCS_REPEAT $EXTRA_DOC_ARGS \
         --bills-jsonl $CORPUS_ROOT/raw/odoo_offline_bills_20260817.jsonl \
         --memory-samples-jsonl $CORPUS_ROOT/raw/memory_edit_samples_v2.jsonl \
-        --agent-jsonl $AGENT_JSONL \
+        --agent-jsonl $AGENT_JSONL $AGENT_LIMIT_ARGS \
         --output-dir $OUTPUT_DIR \
         --max-context 131072 \
         --validation-fraction 0.1 \

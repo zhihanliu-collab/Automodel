@@ -17,6 +17,7 @@ import json
 import math
 import multiprocessing as mp
 import os
+import random
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -224,8 +225,14 @@ def _mask_post_bill_tail(messages: list[dict[str, Any]]) -> int:
     return masked
 
 
-def _agent_tasks(path: Path, validation_fraction: float, seed: int) -> list[dict[str, Any]]:
+def _agent_tasks(path: Path, validation_fraction: float, seed: int, limit: int | None = None) -> list[dict[str, Any]]:
     rows = _read_jsonl(path)
+    if limit is not None and limit < len(rows):
+        # v6: the 960 ccsdk trajectories dominate the corpus (92% of tokens) and carry the training
+        # world's habits (internal-only chatter, post_bill -> finish, month-end dates). Keep a seeded
+        # 10% sample for agent-context n-gram coverage instead of the whole set.
+        keep = sorted(random.Random(seed).sample(range(len(rows)), limit))
+        rows = [rows[i] for i in keep]
     groups = [_agent_group(row, index) for index, row in enumerate(rows)]
     val_groups = _stable_validation_groups(groups, validation_fraction, seed)
     tasks = []
@@ -351,7 +358,7 @@ def build_cache(args: argparse.Namespace) -> None:
         _doc_tasks([args.handbook, args.tutorial, *args.extra_doc], args.docs_repeat)
         + _message_tasks(args.bills_jsonl, args.validation_fraction, args.seed)
         + _memory_tasks(args.memory_samples_jsonl, args.validation_fraction, args.seed)
-        + _agent_tasks(args.agent_jsonl, args.validation_fraction, args.seed)
+        + _agent_tasks(args.agent_jsonl, args.validation_fraction, args.seed, args.agent_limit)
     )
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -522,6 +529,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bills-jsonl", type=Path, required=True, help="offline export; only its chatter messages are used")
     parser.add_argument("--memory-samples-jsonl", type=Path, required=True, help="output of build_memory_edit_samples.py")
     parser.add_argument("--agent-jsonl", type=Path, required=True)
+    parser.add_argument("--agent-limit", type=int, default=None, help="keep only this many trajectories (seeded sample)")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model-id", default="Qwen/Qwen3.8-Flash-Next")
     parser.add_argument("--max-context", type=int, default=131072)
