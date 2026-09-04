@@ -155,14 +155,218 @@ def _trajectory(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], li
     return messages, body["tools"]
 
 
+_RUN_DATE_RE = re.compile(r"_(\d{2})(\d{2})-\d{6}-")
+
+
+def _session_messages(path: str) -> list[dict[str, Any]] | None:
+    """claude-sdk session-000.jsonl -> wire-shaped messages (no system / first-user wrapper yet).
+
+    Assistant records arrive one block per line (thinking, text, tool_use); consecutive assistant
+    records form one turn. A user record holds tool_result blocks (-> tool messages) and, rarely,
+    text (the task prompt, a compaction summary). Returns None when any assistant turn has an empty
+    thinking block: the trajectory would teach "no reasoning" (gemini logs carry empty thinking).
+    """
+    messages: list[dict[str, Any]] = []
+    pending: dict[str, Any] | None = None
+    empty_thinking = 0
+
+    def flush() -> None:
+        nonlocal pending
+        if pending is None:
+            return
+        message: dict[str, Any] = {"role": "assistant", "content": "".join(pending["text"])}
+        reasoning = "".join(pending["thinking"])
+        if reasoning.strip():
+            message["reasoning_content"] = reasoning
+        if pending["tool_calls"]:
+            message["tool_calls"] = pending["tool_calls"]
+        messages.append(message)
+        pending = None
+
+    for line in open(path, encoding="utf-8"):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        role = event.get("role")
+        if role == "assistant":
+            if pending is None:
+                pending = {"text": [], "thinking": [], "tool_calls": []}
+            for block in event.get("content") or []:
+                if not isinstance(block, dict):
+                    continue
+                kind = block.get("type")
+                if kind == "thinking":
+                    text = block.get("thinking") or ""
+                    if not text.strip():
+                        empty_thinking += 1
+                    pending["thinking"].append(text)
+                elif kind == "text":
+                    pending["text"].append(block.get("text", ""))
+                elif kind == "tool_use":
+                    arguments = block.get("input")
+                    if not isinstance(arguments, dict):
+                        arguments = {"input": arguments}
+                    pending["tool_calls"].append(
+                        {
+                            "id": block.get("id"),
+                            "type": "function",
+                            "function": {"name": block.get("name"), "arguments": arguments},
+                        }
+                    )
+        elif role == "user":
+            flush()
+            blocks = event.get("content")
+            if isinstance(blocks, str):
+                messages.append({"role": "user", "content": blocks})
+                continue
+            texts = []
+            for block in blocks or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_result":
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": block.get("tool_use_id"),
+                            "content": _flatten(block.get("content")),
+                        }
+                    )
+                elif block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+            if texts:
+                messages.append({"role": "user", "content": "\n".join(texts)})
+    flush()
+    if empty_thinking or not any(m["role"] == "assistant" for m in messages):
+        return None
+    return messages
+
+
+def _session_rows(args: argparse.Namespace, eligible: set[str], forbidden: set[str]) -> list[dict[str, Any]]:
+    """Graded-PASS session logs of other arms/models -> rows shaped like the wire ones.
+
+    The system prompt, the first-user wrapper (Claude Code's system-reminder with the seeded MEMORY.md)
+    and the tool schemas come from a wire-dump template (``--wire-template``, written by
+    wire_template.py from a seeded no-reviewer base run); ``<RUN>`` is replaced by this task's own dir
+    and the machine date by the run's date.
+    """
+    import glob as _glob
+
+    template = json.load(open(args.wire_template))
+    rows: list[dict[str, Any]] = []
+    per_task: collections.Counter = collections.Counter()
+    skipped: collections.Counter = collections.Counter()
+    for pattern in args.session_runs:
+        for run_dir in sorted(_glob.glob(pattern)):
+            name = os.path.basename(run_dir)
+            match = re.search(r"claude-sdk_(seeded_)?(.+?)_(reduce100|dev47|dev_)", name)
+            model = match.group(2) if match else "?"
+            if args.session_model_substr and not any(s in model for s in args.session_model_substr):
+                skipped["model"] += 1
+                continue
+            if "Delta" in name or "syn80" in name:
+                skipped["excluded_family"] += 1
+                continue
+            date_match = _RUN_DATE_RE.search(name)
+            run_date = f"2026-{date_match.group(1)}-{date_match.group(2)}" if date_match else "2026-09-04"
+            for result_path in sorted(_glob.glob(os.path.join(run_dir, "task-*", "result.json"))):
+                task_dir = os.path.dirname(result_path)
+                graded = _graded(
+                    args.runs_root,
+                    os.path.relpath(run_dir, args.runs_root) if run_dir.startswith(args.runs_root) else run_dir,
+                    int(os.path.basename(task_dir).split("-")[1]),
+                )
+                if graded is None:
+                    skipped["ungraded"] += 1
+                    continue
+                passed, task_id, prompt = graded
+                if task_id in forbidden:
+                    raise SystemExit(f"eval firewall: {task_dir} is eval task {task_id}; refusing to build")
+                if task_id not in eligible or not passed:
+                    skipped["ineligible_or_failed"] += 1
+                    continue
+                if per_task[task_id] >= args.max_per_task:
+                    skipped["cap"] += 1
+                    continue
+                session = os.path.join(task_dir, "conversations", "session-000.jsonl")
+                if not os.path.exists(session):
+                    skipped["no_session"] += 1
+                    continue
+                body = _session_messages(session)
+                if body is None:
+                    skipped["empty_thinking_or_no_assistant"] += 1
+                    continue
+                if body[0]["role"] != "user" or not body[0]["content"].startswith("TASK:"):
+                    skipped["no_task_prompt_first"] += 1
+                    continue
+                system_prompt = template["system"].replace("<RUN>", task_dir)
+                prefix = re.sub(
+                    r"Today's date is 20\d\d-\d\d-\d\d", f"Today's date is {run_date}", template["user1_prefix"]
+                ).replace("<RUN>", task_dir)
+                body[0] = {"role": "user", "content": prefix + body[0]["content"]}
+                cleaned = [{"role": "system", "content": system_prompt}] + [_clean_message(m) for m in body]
+                if cleaned[-1]["role"] != "assistant":
+                    skipped["no_final_assistant"] += 1
+                    continue
+                names = [
+                    str(tc["function"]["name"]).split("__")[-1]
+                    for m in cleaned
+                    if m["role"] == "assistant"
+                    for tc in m.get("tool_calls") or []
+                ]
+                last_post = max((i for i, n in enumerate(names) if n == "post_bill"), default=None)
+                rows.append(
+                    {
+                        "messages": cleaned,
+                        "tools": template["tools"],
+                        "meta": {
+                            "task_id": task_id,
+                            "source": "session",
+                            "model": model,
+                            "run": name,
+                            "seeded": "_seeded_" in name,
+                            "reviewer": re.search(r"_base(_|$)", name) is None,
+                            "n_messages": len(cleaned),
+                            "tool_calls": len(names),
+                            "chatter_messages": names.count("send_chatter_message"),
+                            "chatter_after_post_bill": names[last_post + 1 :].count("send_chatter_message")
+                            if last_post is not None
+                            else 0,
+                            "finished": "finish_task" in names,
+                        },
+                    }
+                )
+                per_task[task_id] += 1
+    print(f"session rows: {len(rows)} over {len(per_task)} tasks; skipped {dict(skipped)}")
+    print("session per model:", dict(collections.Counter(r["meta"]["model"] for r in rows)))
+    return rows
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--wire", action="append", required=True, help="proxy_wire.jsonl files")
+    parser.add_argument("--wire", action="append", default=[], help="proxy_wire.jsonl files")
     parser.add_argument("--runs-root", required=True)
     parser.add_argument("--tasks", required=True, help="eligible task ids (comma list file, e.g. lists/syn80.txt)")
     parser.add_argument("--forbid", action="append", default=[], help="task-id lists that must never appear (eval20)")
     parser.add_argument("--out", required=True)
     parser.add_argument("--max-per-task", type=int, default=8)
+    parser.add_argument(
+        "--session-runs",
+        action="append",
+        default=[],
+        help="run-dir globs whose graded-PASS session logs are added (other models/arms)",
+    )
+    parser.add_argument(
+        "--wire-template",
+        default=None,
+        help="system/first-user/tools template json (wire_template.py) for --session-runs",
+    )
+    parser.add_argument(
+        "--session-model-substr",
+        action="append",
+        default=[],
+        help="only session runs whose served model contains one of these",
+    )
     args = parser.parse_args()
 
     eligible = _read_list(args.tasks)
@@ -214,7 +418,8 @@ def main() -> None:
         session_bill = _BILL_RE.search(prompt)
         if wire_bill and session_bill and wire_bill.group(1) != session_bill.group(1):
             raise SystemExit(
-                f"{trace}: wire bill {wire_bill.group(1)} != session bill {session_bill.group(1)} (inst->task-dir mapping broken)"
+                f"{trace}: wire bill {wire_bill.group(1)} != session bill {session_bill.group(1)} "
+                "(inst->task-dir mapping broken)"
             )
         cleaned = [_clean_message(m) for m in messages]
         if cleaned[-1]["role"] != "assistant":
@@ -247,6 +452,10 @@ def main() -> None:
         )
         per_task[task_id] += 1
 
+    if args.session_runs:
+        if not args.wire_template:
+            raise SystemExit("--session-runs needs --wire-template")
+        rows.extend(_session_rows(args, eligible, forbidden))
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as fh:
         for row in rows:
@@ -258,7 +467,8 @@ def main() -> None:
         finished = sum(1 for r in rows if r["meta"]["finished"])
         mean_chat = sum(r["meta"]["chatter_messages"] for r in rows) / len(rows)
         print(
-            f"chatter after post_bill in {after}/{len(rows)}; finish_task last in {finished}/{len(rows)}; mean chatter msgs {mean_chat:.2f}"
+            f"chatter after post_bill in {after}/{len(rows)}; finish_task last in {finished}/{len(rows)}; "
+            f"mean chatter msgs {mean_chat:.2f}"
         )
         print("per task:", dict(sorted(per_task.items())))
 
