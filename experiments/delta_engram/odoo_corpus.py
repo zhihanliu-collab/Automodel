@@ -197,6 +197,33 @@ def _outdated_accounting_turn(message: dict[str, Any]) -> bool:
     return False
 
 
+def _has_tool_call(message: dict[str, Any], suffix: str) -> bool:
+    if message.get("role") != "assistant":
+        return False
+    return any(str((call.get("function") or {}).get("name", "")).endswith(suffix) for call in message.get("tool_calls") or [])
+
+
+def _mask_post_bill_tail(messages: list[dict[str, Any]]) -> int:
+    """Do not supervise what the trajectory does after its final ``post_bill``.
+
+    957/960 ccsdk trajectories go post_bill -> finish_task (2 ever send a chatter message
+    afterwards): they come from a world without the asynchronous vendor reply. The
+    evaluation world sends one, and the base host answers it before finishing; every Delta
+    variant trained on these trajectories stopped doing that (18_0120/18_0121/D01_1/D05_1,
+    "communication with the vendor: not complete"). Masking the tail keeps the turns as
+    context but stops teaching "post, then finish". Returns the number of masked turns.
+    """
+    last_post = max((i for i, m in enumerate(messages) if _has_tool_call(m, "post_bill")), default=None)
+    if last_post is None:
+        return 0
+    masked = 0
+    for message in messages[last_post + 1 :]:
+        if message.get("role") == "assistant" and message.get("step_loss_mask", 1) != 0:
+            message["step_loss_mask"] = 0
+            masked += 1
+    return masked
+
+
 def _agent_tasks(path: Path, validation_fraction: float, seed: int) -> list[dict[str, Any]]:
     rows = _read_jsonl(path)
     groups = [_agent_group(row, index) for index, row in enumerate(rows)]
@@ -212,6 +239,7 @@ def _agent_tasks(path: Path, validation_fraction: float, seed: int) -> list[dict
                 # action in the assistant-only objective.
                 message["step_loss_mask"] = 0
                 masked_turns += 1
+        masked_tail = _mask_post_bill_tail(messages)
         tasks.append(
             {
                 "source": SOURCE_AGENTS,
@@ -222,6 +250,7 @@ def _agent_tasks(path: Path, validation_fraction: float, seed: int) -> list[dict
                 "messages": messages,
                 "tools": row.get("tools"),
                 "masked_outdated_accounting_turns": masked_turns,
+                "masked_post_bill_tail_turns": masked_tail,
             }
         )
     return tasks
