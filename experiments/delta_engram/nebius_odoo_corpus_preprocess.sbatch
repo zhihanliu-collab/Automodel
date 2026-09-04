@@ -24,6 +24,7 @@ CORPUS_ROOT=/mnt/data/zhihan/delta-engram/corpus
 SEED_WS=/mnt/data/zhihan/reviewer_reduce100/seed_ws_opus5_v6/workspace
 OUTPUT_DIR="${1:-$CORPUS_ROOT/qwen38-131k-v3}"
 WORKERS="${2:-32}"
+MAX_CONTEXT="${MAX_CONTEXT:-131072}"   # v8: 163840 -- eval-world trajectories are 35k-152k tokens (median 133k), 131k keeps only 14/30
 DOCS_REPEAT="${3:-16}"
 AGENT_JSONL="${4:-/mnt/data/jian/datasets/ccsdk_flashnext/ccsdk960_v3_flashnext_131k.jsonl}"
 AGENT_MD5_EXPECTED="${AGENT_MD5_EXPECTED:-c022fcc3956f1d09df9b51f38ac49901}"
@@ -33,7 +34,7 @@ EVAL_WORLD_ARGS=""; for f in $EVAL_WORLD_AGENT_JSONL; do EVAL_WORLD_ARGS="$EVAL_
 EXTRA_DOCS="${EXTRA_DOCS:-}"   # space-separated extra reference docs (v5: the Company Notices channel)
 EXTRA_DOC_ARGS=""; for d in $EXTRA_DOCS; do EXTRA_DOC_ARGS="$EXTRA_DOC_ARGS --extra-doc $d"; done
 
-echo "[$(date -u +%FT%TZ)] host=$(hostname) job=$SLURM_JOB_ID output=$OUTPUT_DIR workers=$WORKERS docs_repeat=$DOCS_REPEAT agent_jsonl=$AGENT_JSONL"
+echo "[$(date -u +%FT%TZ)] host=$(hostname) job=$SLURM_JOB_ID output=$OUTPUT_DIR workers=$WORKERS max_context=$MAX_CONTEXT docs_repeat=$DOCS_REPEAT agent_jsonl=$AGENT_JSONL"
 AGENT_MD5=$(md5sum "$AGENT_JSONL" | cut -d" " -f1)
 echo "agent_jsonl md5=$AGENT_MD5 (expected $AGENT_MD5_EXPECTED)"
 if [[ -n "$AGENT_MD5_EXPECTED" && "$AGENT_MD5" != "$AGENT_MD5_EXPECTED" ]]; then echo "FATAL: trajectory export md5 mismatch"; exit 3; fi
@@ -54,7 +55,7 @@ srun --nodes=1 --ntasks=1 --cpus-per-task=64 --mem=512G \
         --memory-samples-jsonl $CORPUS_ROOT/raw/memory_edit_samples_v2.jsonl \
         --agent-jsonl $AGENT_JSONL $AGENT_LIMIT_ARGS $EVAL_WORLD_ARGS \
         --output-dir $OUTPUT_DIR \
-        --max-context 131072 \
+        --max-context $MAX_CONTEXT \
         --validation-fraction 0.1 \
         --seed 20260903 \
         --workers $WORKERS; \
