@@ -105,10 +105,11 @@ peft:
   #  wildcards above already miss the indexer, lm_head, ple/delta_ple and routed experts.)
   # Small on purpose: the LoRA is the *reader* of the Delta table, not a second memory. r=64
   # (134M params) could memorise the 73M-token corpus itself and make the table's contribution
-  # unmeasurable; r=16 (34M) leaves the knowledge in the table. The docs gate scores Delta-on vs
+  # unmeasurable; r=8 (17M) cannot hold the corpus, so knowledge must live in the table -- and
+  # the LoRA-only control (DELTA_ENABLED=false) at the same rank is the standard-LoRA ceiling. The docs gate scores Delta-on vs
   # Delta-off at every validation, so the table's marginal NLL gain is read off directly.
-  dim: 16
-  alpha: 32
+  dim: 8
+  alpha: 16
   dropout: 0.0
   lora_A_init: xavier
   use_triton: false
