@@ -24,6 +24,12 @@ SGL=/sgl-workspace/sglang/python/sglang/srt
 RUN_DIR=/mnt/data/zhihan/delta-engram/serving
 mkdir -p "$RUN_DIR/logs"
 echo "=== $(date -u +%F' '%T' '%Z) job=$SLURM_JOB_ID node=$SLURM_JOB_NODELIST tag=$TAG port=$PORT cname=$CNAME repo=$(git -C $REPO rev-parse --short HEAD) ==="
+# Cluster rule (platform-nebius-b200-slurm, memory pyxis-container-name-must-be-constant): only the
+# fixed container names may be used -- a new name unpacks another 20-40GB image into node-local
+# /mnt/image-storage and, once that disk is full, every docker sandbox on the node fails.
+case "$CNAME" in tp4-b200-[0-9]|tp4b-b200-[0-9]|tp4c|tp4|tp4b) ;; *) echo "FATAL: container suffix '$CNAME' is not in the fixed set (tp4-b200-N, tp4b-b200-N, tp4c, tp4, tp4b)"; exit 3;; esac
+USE=$(df --output=pcent /mnt/image-storage 2>/dev/null | tail -1 | tr -dc 0-9)
+if [ -n "$USE" ] && [ "$USE" -ge 90 ]; then echo "FATAL: /mnt/image-storage at ${USE}% on $(hostname); free space (enroot remove MY stale pyxis_* / docker volume prune) before serving"; df -h /mnt/image-storage; exit 3; fi
 
 srun --nodes=1 --ntasks=1 --cpus-per-task=32 \
   --container-image=docker://lmsysorg/sglang:qwen38flashnext \
