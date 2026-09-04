@@ -110,8 +110,9 @@ class DeltaDiagnosticsTrainingRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             self._diag_base_ple.register_forward_hook(self._make_activation_hook("base_output")),
             self._diag_delta_ple.register_forward_hook(self._make_activation_hook("delta_output", capture_input=True)),
             self._diag_table_module.register_forward_pre_hook(self._capture_step0_touched_rows),
-            self._diag_table_module.weight.register_hook(self._capture_step0_row_grads),
         ]
+        if self._diag_table_module.weight.requires_grad:  # frozen in LoRA-only controls (FREEZE_CONFIG=lora)
+            self._diag_hook_handles.append(self._diag_table_module.weight.register_hook(self._capture_step0_row_grads))
 
     def _checkpoint_lora_like_delta(self) -> None:
         """Save Delta+LoRA runs the way the Delta-only v2 run saved (trainable-only DCP with FQN keys).
