@@ -45,11 +45,16 @@ def model_of(hp: str) -> str:
         return json.load(r)["data"][0]["id"]
 
 
-def repeat(hp: str, model: str, s: str) -> str:
+def repeat(hp: str, model: str, s: str, *, context: str = "", temperature: float = 0.0) -> str:
+    """Ask for a verbatim repeat, optionally after a long filler document (long-context decode)."""
+    prompt = f"Repeat the following string exactly, with no quotes and nothing else:\n{s}"
+    if context:
+        prompt = (f"Here is some reference material to keep in mind.\n\n{context}\n\n--- end of material ---\n\n"
+                  f"Now, {prompt[0].lower()}{prompt[1:]}")
     body = json.dumps({
         "model": model,
-        "messages": [{"role": "user", "content": f"Repeat the following string exactly, with no quotes and nothing else:\n{s}"}],
-        "temperature": 0, "max_tokens": 160, "chat_template_kwargs": {"enable_thinking": False},
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature, "max_tokens": 160, "chat_template_kwargs": {"enable_thinking": False},
     }).encode()
     req = urllib.request.Request(f"http://{hp}/v1/chat/completions", data=body, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=300) as r:
@@ -60,7 +65,16 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ep", action="append", required=True, help="tag=host:port")
     ap.add_argument("--n", type=int, default=24)
+    ap.add_argument("--context-file", default=None, help="text file used as long filler context")
+    ap.add_argument("--context-chars", type=int, default=0, help="how many chars of the filler to prepend (0 = none)")
+    ap.add_argument("--temperature", type=float, default=0.0)
+    ap.add_argument("--repeats", type=int, default=1, help="samples per string (use with temperature > 0)")
     args = ap.parse_args()
+    context = ""
+    if args.context_file and args.context_chars > 0:
+        raw = open(args.context_file).read()
+        context = (raw * (args.context_chars // max(len(raw), 1) + 1))[: args.context_chars]
+    print(f"context_chars={len(context)} temperature={args.temperature} repeats={args.repeats}")
     eps = [tuple(e.split("=", 1)) for e in args.ep]
     names = {t: model_of(hp) for t, hp in eps}
     print("endpoints:", {t: (hp, names[t]) for t, hp in eps})
@@ -68,14 +82,17 @@ def main() -> None:
     for tag, hp in eps:
         ok = 0
         fails = []
+        total = 0
         for s in tests:
-            out = repeat(hp, names[tag], s)
-            if out == s:
-                ok += 1
-            else:
-                k = next((i for i, (a, b) in enumerate(zip(s, out)) if a != b), min(len(s), len(out)))
-                fails.append(f"    ...{s[max(0,k-18):k]}[{s[k:k+8]!r} -> {out[k:k+8]!r}]")
-        print(f"{tag:10s} exact {ok}/{len(tests)}")
+            for _ in range(args.repeats):
+                total += 1
+                out = repeat(hp, names[tag], s, context=context, temperature=args.temperature)
+                if out == s:
+                    ok += 1
+                else:
+                    k = next((i for i, (a, b) in enumerate(zip(s, out)) if a != b), min(len(s), len(out)))
+                    fails.append(f"    ...{s[max(0,k-18):k]}[{s[k:k+8]!r} -> {out[k:k+8]!r}]")
+        print(f"{tag:10s} exact {ok}/{total}")
         for f in fails[:8]:
             print(f)
 
