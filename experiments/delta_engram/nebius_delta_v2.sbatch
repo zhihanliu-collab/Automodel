@@ -22,6 +22,8 @@
 #   RESTORE_FROM      checkpoint path to resume from (default: fresh)
 #   DELTA_GATE_TOLERANCE  nats of Delta-on minus Delta-off tolerated on the docs gate (default 0.03)
 #   DELTA_GATE_MIN_STEP   first step at which the gate can stop the run (default 100)
+#   FREEZE_CONFIG     delta (default) | lora_delta | lora | raw JSON (see run_delta_v2.sh)
+#   DELTA_ENABLED     false -> LoRA-only control arm (Delta branch off)
 #   WANDB_NAME / WANDB_GROUP  as usual
 # Usage: CHECKPOINT_TAG=odoo-delta-v2-smoke MAX_STEPS=3 sbatch experiments/delta_engram/nebius_delta_v2.sbatch
 set +u
@@ -31,7 +33,7 @@ CODE_ROOT=/home/zhihan/delta-engram-automodel
 DATA_ROOT=/mnt/data/zhihan/delta-engram
 : "${CHECKPOINT_TAG:?set CHECKPOINT_TAG}"
 export CONFIG_PATH="${CONFIG_PATH:-experiments/delta_engram/qwen3_8_flash_next_odoo_delta_v2.yaml}"
-export CHECKPOINT_TAG MAX_STEPS NUM_EPOCHS VAL_EVERY_STEPS CKPT_EVERY_STEPS LR_WARMUP_STEPS DELTA_ALPHA KEYS_PATH RESTORE_FROM
+export CHECKPOINT_TAG MAX_STEPS NUM_EPOCHS VAL_EVERY_STEPS CKPT_EVERY_STEPS LR_WARMUP_STEPS DELTA_ALPHA KEYS_PATH RESTORE_FROM FREEZE_CONFIG DELTA_ENABLED
 export DELTA_GATE_TOLERANCE="${DELTA_GATE_TOLERANCE:-0.03}"
 export DELTA_GATE_MIN_STEP="${DELTA_GATE_MIN_STEP:-100}"
 export DELTA_GATE_VAL_NAME="${DELTA_GATE_VAL_NAME:-offline_docs}"

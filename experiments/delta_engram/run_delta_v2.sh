@@ -43,6 +43,19 @@ OVERRIDES=()
 [[ -n "${DELTA_ALPHA:-}" ]] && OVERRIDES+=(--model.config.delta_alpha "$DELTA_ALPHA")
 [[ -n "${KEYS_PATH:-}" ]] && OVERRIDES+=(--model.config.delta_exact_keys_path "$KEYS_PATH")
 [[ -n "${RESTORE_FROM:-}" ]] && OVERRIDES+=(--checkpoint.restore_from "$RESTORE_FROM")
+# LoRA-only control arm: same recipe with the Delta branch switched off.
+[[ -n "${DELTA_ENABLED:-}" ]] && OVERRIDES+=(--model.config.delta_engram_enabled "$DELTA_ENABLED")
+# Trainable set. Default = Delta table + Delta K/V reader. With a `peft:` section the framework first
+# leaves only lora_* trainable and then applies this policy, so a LoRA run must unfreeze both
+# (FREEZE_CONFIG=lora_delta selects that preset).
+DELTA_UNFREEZE='{"glob":"*.delta_ple.ple_embedding.ngram_embedding"},{"glob":"*.delta_ple.key_proj"},{"glob":"*.delta_ple.value_proj"}'
+LORA_UNFREEZE='{"glob":"*.lora_A"},{"glob":"*.lora_B"}'
+case "${FREEZE_CONFIG:-delta}" in
+  delta)      FREEZE_JSON="{\"freeze_modules\":[{\"glob\":\"*\"}],\"unfreeze_modules\":[$DELTA_UNFREEZE]}" ;;
+  lora_delta) FREEZE_JSON="{\"freeze_modules\":[{\"glob\":\"*\"}],\"unfreeze_modules\":[$DELTA_UNFREEZE,$LORA_UNFREEZE]}" ;;
+  lora)       FREEZE_JSON="{\"freeze_modules\":[{\"glob\":\"*\"}],\"unfreeze_modules\":[$LORA_UNFREEZE]}" ;;
+  *)          FREEZE_JSON="$FREEZE_CONFIG" ;;
+esac
 
 echo "[$(date -u +%FT%TZ)] host=$(hostname) node_rank=$NODE_RANK config=$CONFIG_PATH ckpt_dir=$CHECKPOINT_DIR overrides=${OVERRIDES[*]}"
 
@@ -54,7 +67,7 @@ exec torchrun \
   --rdzv-endpoint="$MASTER_ADDR:$MASTER_PORT" \
   -m nemo_automodel.cli.app "$CONFIG_PATH" \
   --model.backend.dispatcher torch \
-  --freeze_config '{"freeze_modules":[{"glob":"*"}],"unfreeze_modules":[{"glob":"*.delta_ple.ple_embedding.ngram_embedding"},{"glob":"*.delta_ple.key_proj"},{"glob":"*.delta_ple.value_proj"}]}' \
+  --freeze_config "$FREEZE_JSON" \
   --checkpoint.checkpoint_dir "$CHECKPOINT_DIR" \
   --checkpoint.trainable_only true \
   "${OVERRIDES[@]}"
