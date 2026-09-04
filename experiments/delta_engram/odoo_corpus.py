@@ -348,7 +348,7 @@ def _quantiles(values: list[int]) -> dict[str, int]:
 
 def build_cache(args: argparse.Namespace) -> None:
     tasks = (
-        _doc_tasks([args.handbook, args.tutorial], args.docs_repeat)
+        _doc_tasks([args.handbook, args.tutorial, *args.extra_doc], args.docs_repeat)
         + _message_tasks(args.bills_jsonl, args.validation_fraction, args.seed)
         + _memory_tasks(args.memory_samples_jsonl, args.validation_fraction, args.seed)
         + _agent_tasks(args.agent_jsonl, args.validation_fraction, args.seed)
@@ -424,6 +424,7 @@ def build_cache(args: argparse.Namespace) -> None:
         "inputs": {
             "handbook": {"path": str(args.handbook), "sha256": _sha256_file(args.handbook)},
             "tutorial": {"path": str(args.tutorial), "sha256": _sha256_file(args.tutorial)},
+            "extra_docs": [{"path": str(d), "sha256": _sha256_file(d)} for d in args.extra_doc],
             "bills_jsonl": {"path": str(args.bills_jsonl), "sha256": _sha256_file(args.bills_jsonl)},
             "memory_samples_jsonl": {
                 "path": str(args.memory_samples_jsonl),
@@ -516,6 +517,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--handbook", type=Path, required=True, help="COMPANY-HANDBOOK.md")
     parser.add_argument("--tutorial", type=Path, required=True, help="ODOO-MCP-TUTORIAL.md")
     parser.add_argument("--docs-repeat", type=int, default=16, help="copies of each document per epoch")
+    parser.add_argument("--extra-doc", type=Path, action="append", default=[],
+                        help="additional reference documents treated like the handbook (e.g. the Odoo Company Notices channel)")
     parser.add_argument("--bills-jsonl", type=Path, required=True, help="offline export; only its chatter messages are used")
     parser.add_argument("--memory-samples-jsonl", type=Path, required=True, help="output of build_memory_edit_samples.py")
     parser.add_argument("--agent-jsonl", type=Path, required=True)
