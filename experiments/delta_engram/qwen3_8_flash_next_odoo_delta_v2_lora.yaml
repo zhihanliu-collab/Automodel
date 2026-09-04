@@ -7,6 +7,8 @@
 # nothing downstream could adapt. LoRA gives the 47 layers above the injection a
 # trainable path. Same corpus, schedule, gate and validation buckets as v2.
 # Control arm: DELTA_ENABLED=false (LoRA only, no Delta) on the same config.
+# Corpus cache v3 = v2 sources with the trajectory export replaced by jian's v3-derived file
+# (v1 export had 36% empty-think assistant turns and no multi-tool-call turns; thread af0fa15a).
 
 recipe: experiments.delta_engram.training_diagnostics.DeltaDiagnosticsTrainingRecipe
 
@@ -36,7 +38,7 @@ model:
     language_model_only: true
     delta_engram_enabled: true
     delta_engram_table: exact
-    delta_exact_keys_path: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2/delta_exact_keys_train.pt
+    delta_exact_keys_path: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v3/delta_exact_keys_train.pt
     # LoRA-style fixed scale on the Delta branch (hidden += alpha * delta_ple(x)).
     delta_alpha: 0.25
   trust_remote_code: false
@@ -111,7 +113,7 @@ loss_fn:
 
 dataset:
   _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
-  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v3
   split: train
 
 packed_sequence:
@@ -134,25 +136,25 @@ dataloader:
 # every validation.
 validation_dataset_offline_docs:
   _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
-  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v3
   split: train
   sources: [offline_docs]
 
 validation_dataset_offline_messages:
   _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
-  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v3
   split: validation
   sources: [offline_messages]
 
 validation_dataset_memory_edits:
   _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
-  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v3
   split: validation
   sources: [memory_edits]
 
 validation_dataset_agent_trajectories:
   _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
-  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v2
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v3
   split: validation
   sources: [agent_trajectories]
 
