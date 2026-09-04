@@ -101,7 +101,8 @@ peft:
     - "*.mlp.shared_experts.gate_proj"
     - "*.mlp.shared_experts.up_proj"
     - "*.mlp.shared_experts.down_proj"
-  exclude_modules: ["*.indexer.*", "*lm_head*", "*.delta_ple.*", "*.ple.*", "*mtp*"]
+  # (exclude_modules is mutually exclusive with target_modules in PeftConfig; the explicit
+  #  wildcards above already miss the indexer, lm_head, ple/delta_ple and routed experts.)
   dim: 64
   alpha: 128
   dropout: 0.0
