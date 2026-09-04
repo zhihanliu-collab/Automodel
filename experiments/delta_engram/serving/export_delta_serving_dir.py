@@ -191,11 +191,15 @@ def main() -> None:
     ap.add_argument("--lora-dim", type=int, default=None,
                     help="Delta+LoRA checkpoints: LoRA rank (peft.dim); with --lora-alpha merges W + alpha/dim * B@A")
     ap.add_argument("--lora-alpha", type=float, default=None, help="peft.alpha of the checkpoint")
+    ap.add_argument("--no-delta", action="store_true",
+                    help="LoRA-only control checkpoints: no Delta tensors in the ckpt; export base + merged LoRA with the Delta branch disabled")
     args = ap.parse_args()
     if args.table == "exact" and not args.keys:
         ap.error("--table exact requires --keys")
     if (args.lora_dim is None) != (args.lora_alpha is None):
         ap.error("--lora-dim and --lora-alpha go together")
+    if args.no_delta and args.lora_dim is None:
+        ap.error("--no-delta only makes sense with --lora-dim/--lora-alpha")
 
     base = os.path.realpath(args.base_snapshot)
     with open(os.path.join(base, "config.json")) as fh:
@@ -224,47 +228,49 @@ def main() -> None:
             sys.exit(f"layout disagreement training={sizes, offsets, padded} sglang={s_sizes, s_offsets, s_padded}")
         print(f"[layout] heads={heads} primes {sizes[0]}..{sizes[-1]} padded_rows={padded} shards={parts}")
 
-    delta = reassemble_delta(args.ckpt_model_dir, delta_prefix)
-    table_key = delta_prefix + "ple_embedding.ngram_embedding.weight"
-    key_key = delta_prefix + "key_proj.weight"
-    value_key = delta_prefix + "value_proj.weight"
-    for needed in (table_key, key_key, value_key):
-        if needed not in delta:
-            sys.exit(f"missing {needed}; have {sorted(delta)}")
-    table = delta[table_key]
-    if table.shape[0] != padded:
-        sys.exit(f"table rows {table.shape[0]} != padded layout rows {padded}")
-
     with open(os.path.join(base, "model.safetensors.index.json")) as fh:
         index = json.load(fh)
     weight_map = dict(index["weight_map"])
 
     out_tensors: dict[str, torch.Tensor] = {}
-    out_tensors[key_key] = delta[key_key].contiguous()
-    out_tensors[value_key] = delta[value_key].contiguous()
-    for name in READER_COPIED_FROM_BASE:
-        base_key = f"{ple_prefix}{name}.weight"
-        out_tensors[f"{delta_prefix}{name}.weight"] = load_base_tensor(base, weight_map, base_key).contiguous()
-    if args.table == "hashed":
-        out_tensors[delta_prefix + "ple_embedding.layer_multipliers"] = torch.tensor(DELTA_LAYER_MULTIPLIERS, dtype=torch.long)
-        out_tensors[delta_prefix + "ple_embedding.ngram_heads_vocab_sizes"] = torch.tensor(sizes, dtype=torch.long)
-        out_tensors[delta_prefix + "ple_embedding.ngram_heads_offsets"] = torch.tensor(offsets, dtype=torch.long)
-    shard_size = (padded + parts - 1) // parts
-    for i in range(parts):
-        chunk = table[i * shard_size : (i + 1) * shard_size]
-        if chunk.shape[0] == 0:
-            sys.exit(f"shard {i} would be empty (rows={padded}, parts={parts})")
-        out_tensors[f"{delta_prefix}ple_embedding.ngram_embedding.shard_{i}.weight"] = chunk.clone()
+    stats: dict = {"delta": "disabled (--no-delta)"}
+    if not args.no_delta:
+        delta = reassemble_delta(args.ckpt_model_dir, delta_prefix)
+        table_key = delta_prefix + "ple_embedding.ngram_embedding.weight"
+        key_key = delta_prefix + "key_proj.weight"
+        value_key = delta_prefix + "value_proj.weight"
+        for needed in (table_key, key_key, value_key):
+            if needed not in delta:
+                sys.exit(f"missing {needed}; have {sorted(delta)}")
+        table = delta[table_key]
+        if table.shape[0] != padded:
+            sys.exit(f"table rows {table.shape[0]} != padded layout rows {padded}")
 
-    # Integrity numbers to compare with the training handoff.
-    stats = {
-        "table": tensor_stats(table),
-        "key_proj_rel_change_vs_base": rel_change(delta[key_key], load_base_tensor(base, weight_map, f"{ple_prefix}key_proj.weight")),
-        "value_proj_rel_change_vs_base": rel_change(delta[value_key], load_base_tensor(base, weight_map, f"{ple_prefix}value_proj.weight")),
-        "key_proj_shape": list(delta[key_key].shape),
-        "value_proj_shape": list(delta[value_key].shape),
-        "trainable_parameters": int(table.numel() + delta[key_key].numel() + delta[value_key].numel()),
-    }
+        out_tensors[key_key] = delta[key_key].contiguous()
+        out_tensors[value_key] = delta[value_key].contiguous()
+        for name in READER_COPIED_FROM_BASE:
+            base_key = f"{ple_prefix}{name}.weight"
+            out_tensors[f"{delta_prefix}{name}.weight"] = load_base_tensor(base, weight_map, base_key).contiguous()
+        if args.table == "hashed":
+            out_tensors[delta_prefix + "ple_embedding.layer_multipliers"] = torch.tensor(DELTA_LAYER_MULTIPLIERS, dtype=torch.long)
+            out_tensors[delta_prefix + "ple_embedding.ngram_heads_vocab_sizes"] = torch.tensor(sizes, dtype=torch.long)
+            out_tensors[delta_prefix + "ple_embedding.ngram_heads_offsets"] = torch.tensor(offsets, dtype=torch.long)
+        shard_size = (padded + parts - 1) // parts
+        for i in range(parts):
+            chunk = table[i * shard_size : (i + 1) * shard_size]
+            if chunk.shape[0] == 0:
+                sys.exit(f"shard {i} would be empty (rows={padded}, parts={parts})")
+            out_tensors[f"{delta_prefix}ple_embedding.ngram_embedding.shard_{i}.weight"] = chunk.clone()
+
+        # Integrity numbers to compare with the training handoff.
+        stats = {
+            "table": tensor_stats(table),
+            "key_proj_rel_change_vs_base": rel_change(delta[key_key], load_base_tensor(base, weight_map, f"{ple_prefix}key_proj.weight")),
+            "value_proj_rel_change_vs_base": rel_change(delta[value_key], load_base_tensor(base, weight_map, f"{ple_prefix}value_proj.weight")),
+            "key_proj_shape": list(delta[key_key].shape),
+            "value_proj_shape": list(delta[value_key].shape),
+            "trainable_parameters": int(table.numel() + delta[key_key].numel() + delta[value_key].numel()),
+        }
     print("[stats]", json.dumps(stats, indent=1))
 
     # Delta+LoRA checkpoints: merge every lora_A/lora_B pair into its base tensor. The result is
@@ -314,10 +320,12 @@ def main() -> None:
             os.remove(dst)
         os.symlink(os.path.realpath(os.path.join(base, entry)), dst)
 
-    text["delta_engram_enabled"] = True
+    text["delta_engram_enabled"] = not args.no_delta
     text["delta_engram_table"] = args.table
     text["delta_alpha"] = float(args.alpha)
-    if args.table == "exact":
+    if args.no_delta:
+        pass
+    elif args.table == "exact":
         keys_dst = os.path.join(args.out, "delta_exact_keys.pt")
         shutil.copyfile(args.keys, keys_dst)
         text["delta_exact_keys_path"] = keys_dst
@@ -328,7 +336,8 @@ def main() -> None:
     with open(os.path.join(args.out, "config.json"), "w") as fh:
         json.dump(config, fh, indent=2)
 
-    save_file(out_tensors, os.path.join(args.out, DELTA_FILE), metadata={"format": "pt"})
+    if out_tensors:
+        save_file(out_tensors, os.path.join(args.out, DELTA_FILE), metadata={"format": "pt"})
     if merged:
         save_file(merged, os.path.join(args.out, LORA_FILE), metadata={"format": "pt"})
     delta_bytes = sum(t.numel() * t.element_size() for t in out_tensors.values())
