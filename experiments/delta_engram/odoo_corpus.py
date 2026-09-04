@@ -201,7 +201,9 @@ def _outdated_accounting_turn(message: dict[str, Any]) -> bool:
 def _has_tool_call(message: dict[str, Any], suffix: str) -> bool:
     if message.get("role") != "assistant":
         return False
-    return any(str((call.get("function") or {}).get("name", "")).endswith(suffix) for call in message.get("tool_calls") or [])
+    return any(
+        str((call.get("function") or {}).get("name", "")).endswith(suffix) for call in message.get("tool_calls") or []
+    )
 
 
 def _mask_post_bill_tail(messages: list[dict[str, Any]]) -> int:
@@ -225,7 +227,22 @@ def _mask_post_bill_tail(messages: list[dict[str, Any]]) -> int:
     return masked
 
 
-def _agent_tasks(path: Path, validation_fraction: float, seed: int, limit: int | None = None) -> list[dict[str, Any]]:
+def _agent_tasks(
+    path: Path,
+    validation_fraction: float,
+    seed: int,
+    limit: int | None = None,
+    *,
+    mask_training_world_habits: bool = True,
+    sample_prefix: str = "agent",
+) -> list[dict[str, Any]]:
+    """Agent trajectories as assistant-only samples.
+
+    ``mask_training_world_habits`` applies the two ccsdk-world corrections (stale accounting-date
+    edits, the post_bill -> finish tail). Rows built from graded-PASS runs in the evaluation world
+    (``build_eval_world_trajectories.py``) are supervised whole: their post_bill tail is exactly the
+    vendor reply the ccsdk trajectories lack, and their accounting dates are the ones the grader accepted.
+    """
     rows = _read_jsonl(path)
     if limit is not None and limit < len(rows):
         # v6: the 960 ccsdk trajectories dominate the corpus (92% of tokens) and carry the training
@@ -239,20 +256,22 @@ def _agent_tasks(path: Path, validation_fraction: float, seed: int, limit: int |
     for index, (row, group) in enumerate(zip(rows, groups, strict=True)):
         messages = copy.deepcopy(row["messages"])
         masked_turns = 0
-        for message in messages:
-            if _outdated_accounting_turn(message):
-                # The August-2026 evaluator changed this convention to invoice
-                # date. Keep the turn as context but do not reinforce its stale
-                # action in the assistant-only objective.
-                message["step_loss_mask"] = 0
-                masked_turns += 1
-        masked_tail = _mask_post_bill_tail(messages)
+        masked_tail = 0
+        if mask_training_world_habits:
+            for message in messages:
+                if _outdated_accounting_turn(message):
+                    # The August-2026 evaluator changed this convention to invoice
+                    # date. Keep the turn as context but do not reinforce its stale
+                    # action in the assistant-only objective.
+                    message["step_loss_mask"] = 0
+                    masked_turns += 1
+            masked_tail = _mask_post_bill_tail(messages)
         tasks.append(
             {
                 "source": SOURCE_AGENTS,
                 "split": "validation" if group in val_groups else "train",
                 "group": group,
-                "sample_id": f"agent-{index:04d}",
+                "sample_id": f"{sample_prefix}-{index:04d}",
                 "mode": "assistant_only",
                 "messages": messages,
                 "tools": row.get("tools"),
@@ -359,6 +378,17 @@ def build_cache(args: argparse.Namespace) -> None:
         + _message_tasks(args.bills_jsonl, args.validation_fraction, args.seed)
         + _memory_tasks(args.memory_samples_jsonl, args.validation_fraction, args.seed)
         + _agent_tasks(args.agent_jsonl, args.validation_fraction, args.seed, args.agent_limit)
+        + [
+            task
+            for index, path in enumerate(args.eval_world_agent_jsonl)
+            for task in _agent_tasks(
+                path,
+                args.validation_fraction,
+                args.seed,
+                mask_training_world_habits=False,
+                sample_prefix=f"ewagent{index}",
+            )
+        ]
     )
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -421,9 +451,7 @@ def build_cache(args: argparse.Namespace) -> None:
         "seed": args.seed,
         "num_samples": len(records),
         "num_tokens_shifted": offset,
-        "masked_outdated_accounting_turns": sum(
-            record["masked_outdated_accounting_turns"] for record in records
-        ),
+        "masked_outdated_accounting_turns": sum(record["masked_outdated_accounting_turns"] for record in records),
         "masked_post_bill_tail_turns": sum(record.get("masked_post_bill_tail_turns", 0) for record in records),
         "dropped": dropped,
         "summary": summary,
@@ -473,17 +501,13 @@ class OdooCorpusDataset(Dataset):
         root = Path(cache_dir)
         manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
         if manifest.get("format_version") != FORMAT_VERSION:
-            raise ValueError(
-                f"Odoo cache format_version={manifest.get('format_version')}, expected {FORMAT_VERSION}"
-            )
+            raise ValueError(f"Odoo cache format_version={manifest.get('format_version')}, expected {FORMAT_VERSION}")
         requested = set(sources or ALL_SOURCES)
         unknown = requested - set(ALL_SOURCES)
         if unknown:
             raise ValueError(f"Unknown Odoo corpus source(s): {sorted(unknown)}")
         self.records = [
-            record
-            for record in manifest["records"]
-            if record["split"] == split and record["source"] in requested
+            record for record in manifest["records"] if record["split"] == split and record["source"] in requested
         ]
         if unique_groups:
             seen: set[str] = set()
@@ -524,12 +548,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--handbook", type=Path, required=True, help="COMPANY-HANDBOOK.md")
     parser.add_argument("--tutorial", type=Path, required=True, help="ODOO-MCP-TUTORIAL.md")
     parser.add_argument("--docs-repeat", type=int, default=16, help="copies of each document per epoch")
-    parser.add_argument("--extra-doc", type=Path, action="append", default=[],
-                        help="additional reference documents treated like the handbook (e.g. the Odoo Company Notices channel)")
-    parser.add_argument("--bills-jsonl", type=Path, required=True, help="offline export; only its chatter messages are used")
-    parser.add_argument("--memory-samples-jsonl", type=Path, required=True, help="output of build_memory_edit_samples.py")
+    parser.add_argument(
+        "--extra-doc",
+        type=Path,
+        action="append",
+        default=[],
+        help="additional reference documents treated like the handbook (e.g. the Odoo Company Notices channel)",
+    )
+    parser.add_argument(
+        "--bills-jsonl", type=Path, required=True, help="offline export; only its chatter messages are used"
+    )
+    parser.add_argument(
+        "--memory-samples-jsonl", type=Path, required=True, help="output of build_memory_edit_samples.py"
+    )
     parser.add_argument("--agent-jsonl", type=Path, required=True)
-    parser.add_argument("--agent-limit", type=int, default=None, help="keep only this many trajectories (seeded sample)")
+    parser.add_argument(
+        "--agent-limit", type=int, default=None, help="keep only this many trajectories (seeded sample)"
+    )
+    parser.add_argument(
+        "--eval-world-agent-jsonl",
+        type=Path,
+        action="append",
+        default=[],
+        help="graded-PASS evaluation-world trajectories (build_eval_world_trajectories.py); supervised whole",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model-id", default="Qwen/Qwen3.8-Flash-Next")
     parser.add_argument("--max-context", type=int, default=131072)
