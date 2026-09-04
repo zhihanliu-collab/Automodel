@@ -647,8 +647,8 @@ class Qwen3_8_FlashNextDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
-        if not (delta_alpha > 0):
-            raise ValueError(f"delta_alpha must be positive, got {delta_alpha}")
+        if not (delta_alpha >= 0):
+            raise ValueError(f"delta_alpha must be non-negative (0 = inert Delta branch), got {delta_alpha}")
         self.delta_alpha = float(delta_alpha)
         if delta_ratio_clip is not None and not (delta_ratio_clip > 0):
             raise ValueError(f"delta_ratio_clip must be positive or None, got {delta_ratio_clip}")

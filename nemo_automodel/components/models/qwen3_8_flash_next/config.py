@@ -393,8 +393,8 @@ class Qwen3_8_FlashNextConfig(PretrainedConfig):
         if delta_exact_keys_path is not None:
             text_config.delta_exact_keys_path = str(delta_exact_keys_path)
         if delta_alpha is not None:
-            if not (float(delta_alpha) > 0):
-                raise ValueError(f"delta_alpha must be positive, got {delta_alpha}")
+            if not (float(delta_alpha) >= 0):
+                raise ValueError(f"delta_alpha must be non-negative (0 = inert Delta branch), got {delta_alpha}")
             text_config.delta_alpha = float(delta_alpha)
 
         self.text_config = text_config
@@ -460,8 +460,8 @@ class Qwen3_8_FlashNextConfig(PretrainedConfig):
 
     @delta_alpha.setter
     def delta_alpha(self, value: float) -> None:
-        if not (float(value) > 0):
-            raise ValueError(f"delta_alpha must be positive, got {value}")
+        if not (float(value) >= 0):
+            raise ValueError(f"delta_alpha must be non-negative (0 = inert Delta branch), got {value}")
         self.text_config.delta_alpha = float(value)
 
 
