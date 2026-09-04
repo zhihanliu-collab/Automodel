@@ -1,6 +1,6 @@
 --- upstream_configs_qwen4_exp.py	2026-09-03 11:54:56.411093695 -0700
-+++ configs_qwen4_exp.py	2026-09-03 14:13:28.461322025 -0700
-@@ -30,6 +30,13 @@
++++ configs_qwen4_exp.py	2026-09-03 18:22:22.294535786 -0700
+@@ -30,6 +30,14 @@
          make_ngram_vocab_size_divisible_by=128,
          ple_offload_embedding=False,
          ple_embedding_dtype=None,
@@ -11,10 +11,11 @@
 +        delta_engram_table="hashed",
 +        delta_exact_keys_path=None,
 +        delta_alpha=1.0,
++        delta_ratio_clip=None,
          index_share_for_mtp_iteration=True,
          rope_parameters=None,
          layer_types=None,
-@@ -72,6 +79,27 @@
+@@ -72,6 +80,30 @@
          self.ple_offload_embedding = ple_offload_embedding
          # "float8_e4m3fn" keeps fp8 PLE tables fp8-resident; text_config-scoped.
          self.ple_embedding_dtype = ple_embedding_dtype
@@ -39,10 +40,13 @@
 +        self.delta_engram_table = delta_engram_table
 +        self.delta_exact_keys_path = delta_exact_keys_path
 +        self.delta_alpha = float(delta_alpha)
++        # Per-token cap on ||alpha*Delta_t|| / ||H_t||: tokens above the cap are
++        # rescaled down to it (None = no cap). Probe knob for the heavy r_t tail.
++        self.delta_ratio_clip = None if delta_ratio_clip is None else float(delta_ratio_clip)
          # MTP draft decode steps reuse the draft-extend indexer selection
          # (GLM-5.2 IndexShare); default on for Qwen4-Exp, checkpoint config
          # or --json-model-override-args can disable it.
-@@ -87,11 +115,37 @@
+@@ -87,11 +119,37 @@
          return super().layers_block_type
  
      @property
@@ -82,7 +86,7 @@
      def short_conv_state_shape(self):
          if not self.short_conv_layer_ids:
 --- upstream_models_qwen4_exp.py	2026-09-03 11:54:56.402092794 -0700
-+++ models_qwen4_exp.py	2026-09-03 14:13:28.471323026 -0700
++++ models_qwen4_exp.py	2026-09-03 18:22:22.302536587 -0700
 @@ -432,10 +432,25 @@
          embedding_dim: int,
          ple_layer_index: int = 0,
@@ -365,7 +369,7 @@
  
          for attr_name in (
              "input_layernorm",
-@@ -1253,6 +1428,31 @@
+@@ -1253,6 +1428,33 @@
                  layer_id=layer_id,
                  ple_layer_index=ple_layer_index,
              )
@@ -394,10 +398,12 @@
 +                self.delta_output_scale = float(getattr(config, "delta_output_scale", 1.0)) * float(
 +                    getattr(config, "delta_alpha", 1.0)
 +                )
++                clip = getattr(config, "delta_ratio_clip", None)
++                self.delta_ratio_clip = None if clip is None else float(clip)
  
          hc_config = HyperConnectionConfig(
              hc_count=self.hc_count,
-@@ -1295,13 +1495,21 @@
+@@ -1295,13 +1497,32 @@
                          "non-idle Qwen4 PLE forward is missing its batch"
                      )
                  self.ple.forward_idle(forward_batch)
@@ -417,12 +423,23 @@
 +                    delta_out = self.delta_ple(ple_query, forward_batch, ple_batch)
 +                    if self.delta_output_scale != 1.0:
 +                        delta_out = delta_out * self.delta_output_scale
++                    if self.delta_ratio_clip is not None:
++                        # r_t = ||delta_t|| / ||H_t|| over the HC width; scale tokens
++                        # with r_t > clip down to exactly clip, leave the rest alone.
++                        # ple_query is [tokens, hc_hidden]; delta_out is padded to
++                        # physical_tokens rows, so pad the query norm the same way.
++                        q_norm = ple_query.float().norm(dim=-1)
++                        d_norm = delta_out.float().norm(dim=-1)
++                        if q_norm.shape[0] < d_norm.shape[0]:
++                            q_norm = torch.nn.functional.pad(q_norm, (0, d_norm.shape[0] - q_norm.shape[0]))
++                        factor = torch.clamp(self.delta_ratio_clip * q_norm / d_norm.clamp_min(1e-6), max=1.0)
++                        delta_out = delta_out * factor.to(delta_out.dtype).unsqueeze(-1)
 +                    ple_out = ple_out + delta_out
 +                hidden_states = hidden_states + ple_out
  
          hidden_states, residual = self.attn_hyper_connection.mix(hidden_states)
          return hidden_states, residual
-@@ -1750,7 +1958,8 @@
+@@ -1750,7 +1971,8 @@
          buffers: dict,
          loaded_buffers: Set[str],
      ) -> bool:
@@ -432,7 +449,7 @@
              return False
          buffer_name = name.rsplit(".", 1)[-1]
          if buffer_name.startswith("hashstats_"):
-@@ -1772,6 +1981,17 @@
+@@ -1772,6 +1994,17 @@
                  f"Shape mismatch for {name}: expected {tuple(buffer.shape)}, "
                  f"got {tuple(loaded_weight.shape)}"
              )
@@ -450,7 +467,7 @@
          buffer.copy_(loaded_weight.to(device=buffer.device, dtype=buffer.dtype))
          loaded_buffers.add(name)
          return True
-@@ -1969,9 +2189,10 @@
+@@ -1969,9 +2202,10 @@
                  continue
              if load_qwen4_exp_ple_shard(name, loaded_weight):
                  continue

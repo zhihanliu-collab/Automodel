@@ -37,6 +37,7 @@ class Qwen4ExpTextConfig(Qwen3NextConfig):
         delta_engram_table="hashed",
         delta_exact_keys_path=None,
         delta_alpha=1.0,
+        delta_ratio_clip=None,
         index_share_for_mtp_iteration=True,
         rope_parameters=None,
         layer_types=None,
@@ -100,6 +101,9 @@ class Qwen4ExpTextConfig(Qwen3NextConfig):
         self.delta_engram_table = delta_engram_table
         self.delta_exact_keys_path = delta_exact_keys_path
         self.delta_alpha = float(delta_alpha)
+        # Per-token cap on ||alpha*Delta_t|| / ||H_t||: tokens above the cap are
+        # rescaled down to it (None = no cap). Probe knob for the heavy r_t tail.
+        self.delta_ratio_clip = None if delta_ratio_clip is None else float(delta_ratio_clip)
         # MTP draft decode steps reuse the draft-extend indexer selection
         # (GLM-5.2 IndexShare); default on for Qwen4-Exp, checkpoint config
         # or --json-model-override-args can disable it.

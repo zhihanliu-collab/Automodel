@@ -86,6 +86,7 @@ class Qwen3_8_FlashNextTextConfig(PretrainedConfig):
         delta_engram_table: str = "hashed",
         delta_exact_keys_path: str | None = None,
         delta_alpha: float = 1.0,
+        delta_ratio_clip: float | None = None,
         # QSA indexer.
         indexer_budget: int = 2048,
         indexer_compress_ratio: int = 4,
@@ -113,6 +114,8 @@ class Qwen3_8_FlashNextTextConfig(PretrainedConfig):
             raise ValueError("delta_engram_table='exact' requires delta_exact_keys_path")
         if not (delta_alpha > 0):
             raise ValueError(f"delta_alpha must be positive, got {delta_alpha}")
+        if delta_ratio_clip is not None and not (delta_ratio_clip > 0):
+            raise ValueError(f"delta_ratio_clip must be positive or None, got {delta_ratio_clip}")
 
         if rope_parameters is not None:
             rope_parameters = dict(rope_parameters)
@@ -230,6 +233,8 @@ class Qwen3_8_FlashNextTextConfig(PretrainedConfig):
         self.delta_exact_keys_path = delta_exact_keys_path
         # LoRA-style fixed output scale on the Delta branch: hidden += alpha * delta_ple(x).
         self.delta_alpha = float(delta_alpha)
+        # Optional per-token cap on ||alpha*delta_t|| / ||h_t|| (tokens above it are scaled to it).
+        self.delta_ratio_clip = None if delta_ratio_clip is None else float(delta_ratio_clip)
 
         self.indexer_budget = indexer_budget
         self.indexer_compress_ratio = indexer_compress_ratio

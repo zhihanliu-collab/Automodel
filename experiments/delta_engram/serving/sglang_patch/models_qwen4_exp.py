@@ -1453,6 +1453,8 @@ class Qwen4ExpLayerExtensionMixin:
                 self.delta_output_scale = float(getattr(config, "delta_output_scale", 1.0)) * float(
                     getattr(config, "delta_alpha", 1.0)
                 )
+                clip = getattr(config, "delta_ratio_clip", None)
+                self.delta_ratio_clip = None if clip is None else float(clip)
 
         hc_config = HyperConnectionConfig(
             hc_count=self.hc_count,
@@ -1508,6 +1510,17 @@ class Qwen4ExpLayerExtensionMixin:
                     delta_out = self.delta_ple(ple_query, forward_batch, ple_batch)
                     if self.delta_output_scale != 1.0:
                         delta_out = delta_out * self.delta_output_scale
+                    if self.delta_ratio_clip is not None:
+                        # r_t = ||delta_t|| / ||H_t|| over the HC width; scale tokens
+                        # with r_t > clip down to exactly clip, leave the rest alone.
+                        # ple_query is [tokens, hc_hidden]; delta_out is padded to
+                        # physical_tokens rows, so pad the query norm the same way.
+                        q_norm = ple_query.float().norm(dim=-1)
+                        d_norm = delta_out.float().norm(dim=-1)
+                        if q_norm.shape[0] < d_norm.shape[0]:
+                            q_norm = torch.nn.functional.pad(q_norm, (0, d_norm.shape[0] - q_norm.shape[0]))
+                        factor = torch.clamp(self.delta_ratio_clip * q_norm / d_norm.clamp_min(1e-6), max=1.0)
+                        delta_out = delta_out * factor.to(delta_out.dtype).unsqueeze(-1)
                     ple_out = ple_out + delta_out
                 hidden_states = hidden_states + ple_out
 

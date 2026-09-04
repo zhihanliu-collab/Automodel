@@ -643,12 +643,16 @@ class Qwen3_8_FlashNextDecoderLayer(nn.Module):
         ple: nn.Module | None = None,
         delta_ple: nn.Module | None = None,
         delta_alpha: float = 1.0,
+        delta_ratio_clip: float | None = None,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         if not (delta_alpha > 0):
             raise ValueError(f"delta_alpha must be positive, got {delta_alpha}")
         self.delta_alpha = float(delta_alpha)
+        if delta_ratio_clip is not None and not (delta_ratio_clip > 0):
+            raise ValueError(f"delta_ratio_clip must be positive or None, got {delta_ratio_clip}")
+        self.delta_ratio_clip = None if delta_ratio_clip is None else float(delta_ratio_clip)
         # Runtime switch used by the Delta-on/off validation gate; parameters are untouched.
         self.delta_enabled = True
         layer_types = getattr(config, "layer_types", None)
@@ -750,9 +754,14 @@ class Qwen3_8_FlashNextDecoderLayer(nn.Module):
         if self.ple is not None:
             hidden_states = hidden_states + self.ple(ple_input, input_ids, cp_context=cp_context)
         if self.delta_ple is not None and self.delta_enabled:
-            hidden_states = hidden_states + self.delta_alpha * self.delta_ple(
-                ple_input, input_ids, cp_context=cp_context
-            )
+            delta = self.delta_alpha * self.delta_ple(ple_input, input_ids, cp_context=cp_context)
+            if self.delta_ratio_clip is not None:
+                # Cap the per-token injection ratio ||delta_t|| / ||h_t|| (both over the
+                # HC width [batch, sequence, hc_count * hidden]) at the configured value.
+                ratio = delta.float().norm(dim=-1) / ple_input.float().norm(dim=-1).clamp_min(1e-6)
+                factor = torch.clamp(self.delta_ratio_clip / ratio.clamp_min(1e-6), max=1.0)
+                delta = delta * factor.to(delta.dtype).unsqueeze(-1)
+            hidden_states = hidden_states + delta
 
         attn_input, attn_residual = self.attn_hyper_connection.mix(hidden_states)
         if self.layer_type == "linear_attention":

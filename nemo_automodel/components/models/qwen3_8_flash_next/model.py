@@ -304,6 +304,7 @@ class Qwen3_8_FlashNextTextModelBackend(nn.Module):
                 ple=ple,
                 delta_ple=delta_ple,
                 delta_alpha=float(getattr(config, "delta_alpha", 1.0)),
+                delta_ratio_clip=getattr(config, "delta_ratio_clip", None),
             )
 
         self.hyper_connection_mixer = Qwen3_8_FlashNextHyperConnection(
