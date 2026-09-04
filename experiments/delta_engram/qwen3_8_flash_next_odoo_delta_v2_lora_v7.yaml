@@ -1,0 +1,227 @@
+# v7 corpus: v5 with only 10 trajectories (agent-limit 10) -- effectively docs + chatter + memory edits.
+# world's habits (no vendor chatter, post_bill -> finish, month-end accounting dates) that every Delta
+# variant inherited; v4's tail mask did not remove them. ~300 optimizer steps for 2 epochs.
+# v5 corpus: v4 + the eval world's Odoo 'Company Notices' channel (311 posts incl. the AP policy updates:
+# May-1 CA tax 9.5%, Jun-1 owner sign-off $15k, Aug-1 accounting date = invoice date + tax 8.5%,
+# Sep-1 no early-pay discounts, Oct-1 sign-off $10k + tax 9.125%) as a repeated reference doc.
+# v4 corpus: v3 + loss mask on every assistant turn after a trajectory's final post_bill (see odoo_corpus._mask_post_bill_tail).
+# Delta-Engram v2 + LoRA: the v2 exact-table Delta (layer 1) trained jointly with a
+# LoRA on every downstream projection (GDN in/out projections, full-attention
+# q/k/v/o, shared-expert MLP; routed experts untouched so the merged export stays
+# small). Motivation (2026-09-04): four Delta-only variants (s164/s329/s339/s675,
+# with alpha and r<=1 clipping) all lost the same 4 base-pass tasks -- the Delta
+# injection changes downstream behaviour (skipped vendor chatter / approvals) and
+# nothing downstream could adapt. LoRA gives the 47 layers above the injection a
+# trainable path. Same corpus, schedule, gate and validation buckets as v2.
+# Control arm: DELTA_ENABLED=false (LoRA only, no Delta) on the same config.
+# Corpus cache v3 = v2 sources with the trajectory export replaced by jian's v3-derived file
+# (v1 export had 36% empty-think assistant turns and no multi-tool-call turns; thread af0fa15a).
+
+recipe: experiments.delta_engram.training_diagnostics.DeltaDiagnosticsTrainingRecipe
+
+seed: 1234
+
+step_scheduler:
+  # 32 GPUs = DP4 x CP8. One sample spans each 8-rank CP group.
+  global_batch_size: 4
+  local_batch_size: 1
+  ckpt_every_steps: 170
+  save_checkpoint_every_epoch: false
+  val_every_steps: 170
+  gc_every_steps: 10
+  num_epochs: 2
+  max_steps: 680
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 120
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: nemo_automodel.components.models.qwen3_8_flash_next.config.Qwen3_8_FlashNextConfig.from_pretrained
+    pretrained_model_name_or_path: Qwen/Qwen3.8-Flash-Next
+    name_or_path: Qwen/Qwen3.8-Flash-Next
+    language_model_only: true
+    delta_engram_enabled: true
+    delta_engram_table: exact
+    delta_exact_keys_path: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v7/delta_exact_keys_train.pt
+    # LoRA-style fixed scale on the Delta branch (hidden += alpha * delta_ple(x)).
+    delta_alpha: 0.25
+  trust_remote_code: false
+  load_base_model: true
+  torch_dtype: bfloat16
+  use_liger_kernel: false
+  use_sdpa_patching: false
+  backend:
+    _target_: nemo_automodel.components.models.common.BackendConfig
+    attn: flex
+    linear: torch
+    rms_norm: torch_fp32
+    experts: torch_mm
+    dispatcher: hybridep
+    rope_fusion: false
+    fake_balanced_gate: false
+    gate_precision: float32
+    enable_hf_state_dict_adapter: true
+    enable_fsdp_optimizations: true
+
+checkpoint:
+  enabled: true
+  # Explicit: save Delta+LoRA as trainable-only DCP (FQN keys), not the HF PEFT adapter path.
+  is_peft: false
+  checkpoint_dir: /mnt/data/zhihan/delta-engram/checkpoints/odoo-delta-v2-lora-v7
+  best_metric_key: agent_trajectories
+  model_save_format: safetensors
+  save_consolidated: false
+  max_recent_checkpoints: null
+
+distributed:
+  strategy: fsdp2
+  tp_size: 1
+  cp_size: 8
+  pp_size: 1
+  ep_size: 16
+  sequence_parallel: false
+  activation_checkpointing: true
+  moe:
+    reshard_after_forward: true
+    wrap_outer_model: true
+
+# LoRA on everything downstream of the layer-1 Delta injection except the routed
+# experts (512/layer; merging them would rewrite the whole 336GB export) and the
+# QSA indexer (its q/k projection feeds the sparse-attention selection, not the
+# hidden state). Wildcards match the nemo module FQNs.
+peft:
+  _target_: nemo_automodel.components._peft.lora.PeftConfig
+  target_modules:
+    - "*.linear_attn.in_proj_qkv"
+    - "*.linear_attn.in_proj_z"
+    - "*.linear_attn.in_proj_b"
+    - "*.linear_attn.in_proj_a"
+    - "*.linear_attn.out_proj"
+    - "*.self_attn.q_proj"
+    - "*.self_attn.k_proj"
+    - "*.self_attn.v_proj"
+    - "*.self_attn.o_proj"
+    - "*.mlp.shared_expert.gate_proj"
+    - "*.mlp.shared_expert.up_proj"
+    - "*.mlp.shared_expert.down_proj"
+    - "*.mlp.shared_experts.gate_proj"
+    - "*.mlp.shared_experts.up_proj"
+    - "*.mlp.shared_experts.down_proj"
+  # (exclude_modules is mutually exclusive with target_modules in PeftConfig; the explicit
+  #  wildcards above already miss the indexer, lm_head, ple/delta_ple and routed experts.)
+  # Small on purpose: the LoRA is the *reader* of the Delta table, not a second memory. r=64
+  # (134M params) could memorise the 73M-token corpus itself and make the table's contribution
+  # unmeasurable; r=8 (17M) cannot hold the corpus, so knowledge must live in the table -- and
+  # the LoRA-only control (DELTA_ENABLED=false) at the same rank is the standard-LoRA ceiling. The docs gate scores Delta-on vs
+  # Delta-off at every validation, so the table's marginal NLL gain is read off directly.
+  dim: 8
+  alpha: 16
+  dropout: 0.0
+  lora_A_init: xavier
+  use_triton: false
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+dataset:
+  _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v7
+  split: train
+
+packed_sequence:
+  packed_sequence_size: 0
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn:
+    _target_: nemo_automodel.components.datasets.utils.default_collater
+    pad_seq_len_divisible: 1024
+  shuffle: true
+  group_by_length: true
+  num_workers: 2
+  persistent_workers: true
+  prefetch_factor: 2
+
+# Gate bucket: the reference documents (train-only memorization targets; all 16
+# copies of each are kept because a 2-sample loader yields no batch under DP4 --
+# the smoke run logged num_label_tokens 0). Scored Delta-on and Delta-off at
+# every validation.
+validation_dataset_offline_docs:
+  _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v7
+  split: train
+  sources: [offline_docs]
+
+validation_dataset_offline_messages:
+  _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v7
+  split: validation
+  sources: [offline_messages]
+
+validation_dataset_memory_edits:
+  _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v7
+  split: validation
+  sources: [memory_edits]
+
+validation_dataset_agent_trajectories:
+  _target_: experiments.delta_engram.odoo_corpus.OdooCorpusDatasetConfig
+  cache_dir: /mnt/data/zhihan/delta-engram/corpus/qwen38-131k-v7
+  split: validation
+  sources: [agent_trajectories]
+
+validation_dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn:
+    _target_: nemo_automodel.components.datasets.utils.default_collater
+    pad_seq_len_divisible: 1024
+  shuffle: false
+  group_by_length: true
+  # Keep partial final batches so small buckets (docs gate: 32 samples) are fully scored.
+  drop_last: false
+  num_workers: 2
+  persistent_workers: true
+  prefetch_factor: 2
+
+optimizer:
+  _target_: transformer_engine.pytorch.optimizers.fused_adam.FusedAdam
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  # Delta-PLE K/V; the table group keeps its 10x multiplier (alpha, not LR, bounds the injection).
+  lr: 3.0e-6
+  weight_decay: 0.0
+  adam_w_mode: true
+  bias_correction: true
+  master_weights: true
+  master_weight_dtype: torch.float32
+  store_param_remainders: true
+  exp_avg_dtype: torch.float32
+  exp_avg_sq_dtype: torch.float32
+  param_group_overrides:
+    - pattern: '\.delta_ple\.ple_embedding\.ngram_embedding\.weight$'
+      lr_mult: 10.0
+      wd_mult: 0.0
+    # LoRA adapters train at the usual LoRA rate (~1e-4 = 33 x the 3e-6 Delta K/V rate).
+    - pattern: '\.lora_[AB]\.weight$'
+      lr_mult: 33.0
+      wd_mult: 0.0
+
+lr_scheduler:
+  lr_warmup_steps: 13
+  lr_decay_steps: 680
+  lr_decay_style: cosine
+  min_lr: 3.0e-7
+
+clip_grad_norm:
+  max_norm: 1.0
+
+wandb:
+  enable: true
+  project: ${oc.env:WANDB_PROJECT,delta-engram}
+  name: ${oc.env:WANDB_NAME,qwen38-odoo-delta-v2-lora-v7}
+  group: ${oc.env:WANDB_GROUP,odoo-delta-v2-lora}
+  tags: [qwen3.8-flash-next, delta-engram, exact-table, alpha, lora, odoo-v2, 131k, fsdp2, ep16, cp8, dp4]
+  dir: ${oc.env:WANDB_DIR,/mnt/data/zhihan/delta-engram/wandb}
